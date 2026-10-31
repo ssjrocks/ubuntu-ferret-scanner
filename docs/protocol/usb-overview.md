@@ -7,7 +7,7 @@ Date: 2026-10-31. Host: Ubuntu, kernel 7.0.
 
 - USB ID: `2bc5:069c` (Orbbec vendor ID)
 - Product string: `CR-Scan Ferret`, including on this Ferret Pro
-- Power: bus powered, requests 500 mA
+- Power: bus powered, requests 896 mA at 5 Gbit/s and 500 mA at 480 Mbit/s
 - Linux binds `uvcvideo` to the cameras and `usbhid` to the IMU, with no vendor
   driver needed.
 
@@ -20,21 +20,32 @@ Date: 2026-10-31. Host: Ubuntu, kernel 7.0.
 | 4, 5 | RGB camera control and stream | uvcvideo |
 | 6 | IMU (`CR-Scan FerretIMU`) | usbhid |
 
-All video streams use bulk transfers (512-byte packets at USB 2 speed).
+All video streams use bulk transfers (1024-byte packets with bursts of up to 16 at
+5 Gbit/s, 512-byte packets at 480 Mbit/s).
 
-## Video modes seen at 480 Mbit/s
+## Video modes
 
-Every mode offers 15, 13, 12, 10 and 5 fps. 15 fps is the maximum in this
-connection state.
+The app should require 5 Gbit/s and warn at 480 Mbit/s.
 
 | Stream | Formats | Sizes |
 |---|---|---|
 | Depth | Y14, Y10, Y8, MJPEG | 320x200, 640x400, 1280x800; 800x600 except Y10 and MJPEG |
 | IR | Y10, Y8, MJPEG | 320x200, 640x400, 1280x800; 800x600 for Y8 only |
-| RGB | MJPEG | 320x240, 640x360, 640x480, 1280x720, 1280x800, 1280x960, 1920x1080 |
+| RGB | MJPEG, YUY2 (5 Gbit/s only) | 320x240, 640x360, 640x480, 1280x720, 1280x800, 1280x960, 1920x1080 |
+
+| Link | Frame rates | Modes |
+|---|---|---|
+| 5 Gbit/s | 30, 20, 15, 10, 5 | 38 |
+| 480 Mbit/s | 15, 13, 12, 10, 5 | 31 |
 
 Y10 and Y14 frame sizes match packed pixels: 1280x800 Y14 is 1,792,000 bytes.
-At 15 fps that stream alone is 215 Mbit/s.
+Advertised peak rates at 30 fps, from the descriptors:
+
+- Depth 1280x800 Y14: 430 Mbit/s
+- IR 1280x800 Y10: 307 Mbit/s
+- RGB 1920x1080 YUY2: 995 Mbit/s
+
+These are advertised modes. None has been streamed yet.
 
 ## Vendor control units
 
@@ -58,9 +69,6 @@ of 62 fields, 32 bits each. The data layout has not been read.
 
 ## Open questions
 
-- Does the scanner reach 5 Gbit/s with another cable? Listings quote 30 fps, but
-  it reported 15 fps at most at 480 Mbit/s. The USB 2 descriptors' device
-  qualifier has `bMaxPacketSize0 = 9`, which may hint at a USB 3 mode. Unproven.
 - Which stream carries the depth used for scanning, and is it computed on the
   scanner or from raw frames on the PC?
 - Where is the factory calibration stored, and how is it read?
