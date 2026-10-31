@@ -60,7 +60,7 @@ Of 130 properties documented in the SDK, 32 answered. Only get requests were sen
 - What sets the depth range. The official app reaches past 40 cm.
 - Whether settings survive a power cycle. The two non-default values may have been
   left by the official app or set at the factory.
-- Structure reads, including depth modes and calibration, are untested.
+- Where the lens and alignment calibration can be read safely.
 
 ## Device data
 
@@ -95,6 +95,7 @@ Date: 2026-10-31. Source: read-only structure and raw-data requests.
 
 Raw block 4027 stopped the scanner responding. Its depth control channel failed with
 USB error -71. A USB reset then dropped the scanner from the bus until it was replugged.
+After the replug, colour and depth Y14 streamed at 30 fps with no USB errors.
 `ferret-props` refuses this block and stops at the first failed request.
 
 Read unknown blocks one at a time, and check the camera nodes after each.
