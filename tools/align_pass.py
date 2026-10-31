@@ -3,7 +3,7 @@
 
 Uses point-to-plane ICP (Chen and Medioni) with projective matching (Newcombe et al.,
 KinectFusion) against a keyframe, then pose graph loop closure when the path revisits
-earlier keyframes. The lens centre is assumed to be mid-frame, and distortion is ignored.
+earlier keyframes. Lens values are the scanner's factory calibration.
 """
 import argparse
 import csv
@@ -12,7 +12,8 @@ import json
 import numpy as np
 
 from pose_graph import edge_error, optimize
-from depth_to_cloud import BASELINE, FOCAL, FRAME_BYTES, HEIGHT, MODE_OFFSETS, UNIT, WIDTH, render, write_ply
+from depth_to_cloud import (BASELINE, CENTRE_X, CENTRE_Y, FOCAL, FRAME_BYTES, HEIGHT, MODE_OFFSETS,
+                           UNIT, WIDTH, render, write_ply)
 
 DOWNSCALES = (8, 4)
 ITERATIONS = 12
@@ -72,7 +73,7 @@ class Level:
     def __init__(self, depth, factor):
         self.h, self.w = depth.shape
         self.focal = FOCAL / factor
-        self.cx, self.cy = (WIDTH / 2) / factor, (HEIGHT / 2) / factor
+        self.cx, self.cy = CENTRE_X / factor, CENTRE_Y / factor
         v, u = np.mgrid[0 : self.h, 0 : self.w].astype(np.float32)
         x = (u - self.cx) * depth / self.focal
         y = (v - self.cy) * depth / self.focal
@@ -279,7 +280,7 @@ def main():
         rows, cols = np.nonzero(~np.isnan(depth))
         rows, cols = rows[::2], cols[::2]
         z = depth[rows, cols]
-        p = np.column_stack(((cols - WIDTH / 2) * z / FOCAL, (rows - HEIGHT / 2) * z / FOCAL, z))
+        p = np.column_stack(((cols - CENTRE_X) * z / FOCAL, (rows - CENTRE_Y) * z / FOCAL, z))
         voxel_merge(sums, counts, p @ pose[:3, :3].T + pose[:3, 3])
 
     # Flip y back to up for viewing: maps use y down.

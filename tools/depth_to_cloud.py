@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turns a raw Y14 depth capture into a point cloud and optional preview images.
 
-The formula is in docs/protocol/commands.md. The lens centre is assumed to be mid-frame
-and distortion is ignored, so positions are approximate, especially near the edges.
+The formula is in docs/protocol/commands.md. Lens values are the scanner's factory
+calibration from block 4027, which lists no depth distortion.
 """
 import argparse
 import warnings
@@ -15,6 +15,8 @@ FRAME_BYTES = WIDTH * HEIGHT * 14 // 8
 UNIT = 0.5
 BASELINE = 149.907
 FOCAL = 956.7727
+CENTRE_X = 645.56445
+CENTRE_Y = 401.40128
 MODE_OFFSETS = {"close": 218.0, "long": 100.0}
 MAX_FRAMES = 24
 
@@ -44,8 +46,8 @@ def load_depth_mm(path, offset):
 def to_points(depth):
     rows, cols = np.nonzero(~np.isnan(depth))
     z = depth[rows, cols]
-    x = (cols - WIDTH / 2) * z / FOCAL
-    y = (HEIGHT / 2 - rows) * z / FOCAL
+    x = (cols - CENTRE_X) * z / FOCAL
+    y = (CENTRE_Y - rows) * z / FOCAL
     return np.column_stack((x, y, z)).astype(np.float32)
 
 

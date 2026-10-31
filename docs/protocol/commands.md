@@ -91,14 +91,16 @@ Date: 2026-10-31. Source: read-only structure and raw-data requests.
 - Struct 1003 (temperatures) reads about 28 C.
 - Structs 1045, 1064 and 1103 are not supported.
 
-## Do not read
+## Reading blocks safely
 
-Raw block 4027 stopped the scanner responding. Its depth control channel failed with
-USB error -71. A USB reset then dropped the scanner from the bus until it was replugged.
-After the replug, colour and depth Y14 streamed at 30 fps with no USB errors.
-`ferret-props` refuses this block and stops at the first failed request.
+Use the list sequence (opcodes 29, 30, 31) for block 4027, as the SDK does. It returned 304
+bytes with no problem. Reading 4027 with the raw sequence (opcodes 17, 18, 19) stopped the
+depth control channel with USB error -71, and a USB reset then dropped the scanner from the
+bus until it was replugged. After the replug it worked normally. `ferret-props` refuses
+that raw read and stops at the first failed request.
 
-Read unknown blocks one at a time, and check the camera nodes after each.
+Check which sequence the SDK uses for a block before reading it. Read unknown blocks one at
+a time, and check the camera nodes after each.
 
 Device data contains the serial number and calibration, so keep it out of this repo.
 

@@ -74,4 +74,18 @@ Surface spread is the median thickness in 8 mm columns of the cloud, across all 
   improvement yet, so the default remains the narrow search.
 - The cause is unproven. Unmodelled lens distortion is the main suspect, because the same
   surface seen from different views would then disagree slightly.
-- Next: lens centre and distortion. See `protocol/camera-layout.md`.
+
+### Retest with factory calibration
+
+The tools now use the stored lens centre. The stored depth distortion is zero, which rules out
+the distortion theory above.
+
+| Loop search | Matches | Median surface spread |
+|---|---|---|
+| Off | 0 | 2.90 mm |
+| Default | 10 | 2.89 mm |
+| Wide | 73 | 4.06 mm |
+
+Default correction has almost no effect, and wide correction still makes surfaces thicker. The
+cause is unknown. Candidates are poor wide matches, the fixed loop weight, or this
+whole-cloud measure mixing in real shape. The default stays narrow.

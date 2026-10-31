@@ -68,8 +68,8 @@ void read_struct(Scanner& scanner, uint32_t id, const std::string& directory) {
 void read_block(Scanner& scanner, const char* kind, uint32_t id, uint16_t start_op, uint16_t read_op,
                 uint16_t finish_op, size_t size_offset, size_t data_offset,
                 const std::string& directory) {
-    if (id == kHangingRawBlock) {
-        printf("%s %u: skipped, this read stopped the scanner responding\n", kind, id);
+    if (id == kHangingRawBlock && start_op == kOpRawStart) {
+        printf("%s %u: skipped, a raw read stopped the scanner responding. Use --list.\n", kind, id);
         return;
     }
 
