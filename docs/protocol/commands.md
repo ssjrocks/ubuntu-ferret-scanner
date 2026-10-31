@@ -122,3 +122,43 @@ to 512 bytes on control 1. The SDK requires all streams to be stopped first.
   scale differs from close range, so close-range calibration does not carry over.
 - Not tested yet: whether the mode survives a power cycle, long-range distance limits,
   depth accuracy, and how the official app behaves afterwards.
+
+## Converting depth values to distance
+
+Date: 2026-10-31. Source: tape measurements compared with values stored in the scanner.
+
+Raw block 4026 is 28 bytes. These values were read in both modes:
+
+| Field | Close range | Long range |
+|---|---|---|
+| Byte offset 4, float | 149.907 | 149.907 |
+| Byte offset 8, float | 657.9214 | 1434.2688 |
+| Byte offset 12, float | 956.7727 | 956.7727 |
+| Byte offset 16, float | 0.5 | 0.5 |
+| Byte offset 20, float | 218 | 100 |
+
+Y14 values fit this formula, where value 0 means no depth:
+
+```
+distance_mm = unit * baseline * focal / (value / 64 + offset)
+```
+
+Here `baseline` is 149.907, `focal` is 956.7727, `unit` is 0.5 and `offset` is the mode's
+value at byte 20. The field names are inferred from how they behave. The 64 fits 6
+fractional bits in a 14-bit value with 8 integer bits, the SDK's stated default.
+
+| Mode | Value | Tape | Formula |
+|---|---|---|---|
+| Close | 8813 | About 20 cm | 20.2 cm |
+| Close | 1034 | About 30 cm | 30.6 cm |
+| Long | 4662 | About 41 cm | 41.5 cm |
+| Long | 2189-2350 | About 51.7 cm | 52.4-53.4 cm |
+
+- The formula reads about 1-3% long against the tape. The tape started at the middle of
+  the scanner, which may not be the optical origin.
+- The value at byte 8 equals `baseline * focal / offset`, the far limit in 0.5 mm units.
+- The 14-bit range gives about 151-329 mm in close range and 201-717 mm in long range.
+  Together they match the 150-700 mm quoted in listings.
+- `focal` only applies to 1280x800. Other sizes are untested.
+- This gives distance along the camera axis at best. Lens centre and distortion are not
+  known yet, so 3D accuracy is unmeasured.
