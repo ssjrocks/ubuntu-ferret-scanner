@@ -7,6 +7,30 @@ and WiFi.
 mainly on one Ferret Pro. WiFi and the motion sensor are not done. Calibration values are
 currently built in from that one scanner, so another scanner would need its own.
 
+## Preview
+
+The first 10 seconds of a handheld desk scan, replayed from its recording through the app.
+The cloud builds as tracking follows the scanner, with the distance gauge on the left. The
+infrared tile is empty because recordings don't save infrared.
+
+![The app building a live point cloud from a replayed desk scan](docs/images/app-replay.gif)
+
+[Watch the sharper MP4](docs/images/app-replay.mp4)
+
+The app during a scan, with the rough live cloud, colour and depth previews:
+
+![The app showing a live point cloud, camera previews and distance gauge](docs/images/app-live-scan.jpg)
+
+The models built from that 74-second scan, at 0.7 mm detail with about 9 million triangles:
+
+| Bare model | Textured model |
+|---|---|
+| ![Bare 3D model of a cluttered desk with a keyboard and game controller](docs/images/model-bare.jpg) | ![Coloured 3D model of the same desk](docs/images/model-textured.jpg) |
+
+These come from one handheld scan on one desk, without touching it up. The green tint is RGB
+lighting in the room. Accuracy is still being measured, and a corner of the video is blurred
+for its last 1.5 seconds to hide on-screen text.
+
 ## Run it
 
 ```bash
