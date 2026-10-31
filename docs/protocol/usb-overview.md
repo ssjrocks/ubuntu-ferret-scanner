@@ -157,3 +157,24 @@ objects at mixed distances. Actual distances were not measured.
 - IR showed dots on many surfaces with no depth, including part of a shelf and a blue
   plastic tub that looked about as near as the box. A distance limit may not be
   the whole explanation. Surface type or a setting could also play a part.
+
+## First distance estimate
+
+Date: 2026-10-31. Source: tape measurements on the desk scene above, compared with
+Y14 values. This is a rough estimate from two points, not calibration.
+
+| Point | Measured distance | Y14 value |
+|---|---|---|
+| Lighter box, far end | 32.5 cm | About 2150 |
+| Drawer unit, handle area | 31.5-37.5 cm, depending on the scanner edge used | About 600, +/- 250 |
+
+- Y14 values change at a nearly constant rate across the flat box, about 7.6 per
+  pixel. Inverse depth behaves this way on a plane and plain distance does not, so
+  the values are probably disparity-like. Not proven.
+- Fitting `value = K / distance - c` to these points puts value 0 at about 35-40 cm.
+  That fits depth stopping just past the drawers, and is well short of the 70 cm
+  quoted in listings.
+- The estimate is weak. The scanner's reference point is unknown, the points were
+  matched by eye between cameras, and two points fit any curve of this form.
+
+Next test: keep the scanner still and move a flat card to several measured distances.
