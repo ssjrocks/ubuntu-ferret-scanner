@@ -23,3 +23,13 @@ Date: 2026-10-31. Source: 20 seconds of long-range Y14 at 1280x800, aligned offl
 - The lens centre is assumed, distortion is ignored, and the motion sensor is unused.
 - `align_pass.py` ran offline under an 8 GB limit and took longer than the 20-second
   capture. Its real memory use was not measured.
+
+### Scale check
+
+A 2 mm view with a ruler grid shows the keyboard about 440 mm across, or about 443 mm along
+its slightly rotated length. The edges were read by eye to about +/- 10 mm. A tape across
+the real keyboard gave 440-450 mm. An earlier 425 mm figure came from a coarser picture
+and was wrong.
+
+This suggests the combined cloud's scale is right to within a few percent over about
+44 cm. It is one object on one pass, so it is not an accuracy figure.
