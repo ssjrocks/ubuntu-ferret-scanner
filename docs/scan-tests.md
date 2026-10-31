@@ -89,3 +89,22 @@ the distortion theory above.
 Default correction has almost no effect, and wide correction still makes surfaces thicker. The
 cause is unknown. Candidates are poor wide matches, the fixed loop weight, or this
 whole-cloud measure mixing in real shape. The default stays narrow.
+
+## First coloured scan
+
+Date: 2026-10-31. Source: `tools/colour_pass.py` on the looping pass, using poses from the
+default loop search and every 4th depth frame.
+
+- Result: about 1.57 million coloured points. Viewed from above, the keyboard, game controller,
+  mouse, radio and tape are recognisable, with readable key rows by eye.
+- Depth and colour were recorded by separate programs. The first sync attempt matched scanner
+  speed to picture change, gave a weak result at the edge of its search, and smeared the
+  colour. Its frame numbers also slipped where colour frames failed to decode.
+- The working method keeps each colour frame's real timestamp, then tests which time shift
+  lands depth edges on colour edges in the fastest frames. It found 178 ms, with a score of
+  23.26 against a typical 19.57 and a spread of 1.17.
+- Colour is a plain average, so uneven lighting and screen glow show as patches.
+- Some areas still show smearing or doubling, especially around the edges of the scan.
+- The colour centre is the rough value in `protocol/camera-layout.md`, so colour accuracy is
+  unmeasured.
+- The tool stops if the best time shift lands at the edge of its search.
