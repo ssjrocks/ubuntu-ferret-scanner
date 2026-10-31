@@ -45,8 +45,13 @@ Rotation between the cameras is under 0.14 degrees. Translation is 19.47, -0.19 
   px across all three distances. That is 23 px from the stored 631.75, so the 1280x720 and
   1920x1080 colour modes do not use the first record directly.
 - The colour tool uses factory focal length, distortion and transform, with a measured centre
-  of 655, 366 at 1280x720. Painted frames line up by eye, but this is not measured. The 1280x800
-  colour mode should be tested, since it may match the record directly.
+  of 655, 366 at 1280x720. Painted frames line up by eye, but this is not measured.
+- 1280x800 colour does not match the stored centre either. One box at 325 mm gives a centre of
+  about 657, 421 against the stored 631.75, 401.90. With the stored centre the colour lands
+  about 25 px to the side. With the measured centre the box edges line up by eye.
+- The colour-to-depth width ratio is 0.860 at 1280x800, against 0.878 from the stored focal
+  lengths. The stored colour values may belong to another colour setup. Unknown.
+- The first few 1280x800 MJPEG frames did not decode, so discard them.
 
 ## Width finding
 
