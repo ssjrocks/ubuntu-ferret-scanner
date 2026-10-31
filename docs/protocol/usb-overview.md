@@ -72,10 +72,8 @@ of 62 fields, 32 bits each. The data layout has not been read.
 - Which stream carries the depth used for scanning, and is it computed on the
   scanner or from raw frames on the PC?
 - Where is the factory calibration stored, and how is it read?
-- Does streaming need vendor commands first?
+- Does valid depth need vendor commands first?
 - How does the WiFi bridge carry the data?
-
-No stream has been started yet, so frames, calibration and IMU data are untested.
 
 ## First stream test
 
