@@ -61,3 +61,42 @@ Of 130 properties documented in the SDK, 32 answered. Only get requests were sen
 - Whether settings survive a power cycle. The two non-default values may have been
   left by the official app or set at the factory.
 - Structure reads, including depth modes and calibration, are untested.
+
+## Device data
+
+Date: 2026-10-31. Source: read-only structure and raw-data requests.
+
+- Chip `MX6600`, firmware `1.2.2`. The SDK says MX6600 raw disparity is 14 bits, which
+  matches Y14.
+- Struct 1043 (current depth mode) reads `Close_range_mode Default`.
+- Raw 4034 (depth mode list) holds 52-byte records. Mode names start 16 bytes in:
+
+| Mode |
+|---|
+| `Close_range_mode Default` (current) |
+| `Long_range_mode Default` |
+| `Close_range_mode Interleave` |
+| `Long_range_mode Interleave` |
+| `Close_range_mode Narrow_View` |
+| `Long_range_mode Narrow_View` |
+| `Grid_of_Dots Calibration` |
+| `In_scene Calibration` |
+
+- `Long_range_mode` may explain why the official app reaches past 40 cm. This is
+  unproven until the mode is set and tested.
+- Struct 1002 (baseline calibration) holds floats 130.0 and 7.5. Their meaning and
+  order are unconfirmed.
+- Raw 4026 (depth calibration) is 28 bytes and is not decoded.
+- Struct 1001 (camera parameters) is all NaN, so lens calibration is not there.
+- Struct 1003 (temperatures) reads about 28 C.
+- Structs 1045, 1064 and 1103 are not supported.
+
+## Do not read
+
+Raw block 4027 stopped the scanner responding. Its depth control channel failed with
+USB error -71. A USB reset then dropped the scanner from the bus until it was replugged.
+`ferret-props` refuses this block and stops at the first failed request.
+
+Read unknown blocks one at a time, and check the camera nodes after each.
+
+Device data contains the serial number and calibration, so keep it out of this repo.
