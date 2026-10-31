@@ -178,3 +178,21 @@ Y14 values. This is a rough estimate from two points, not calibration.
   matched by eye between cameras, and two points fit any curve of this form.
 
 Next test: keep the scanner still and move a flat card to several measured distances.
+
+## Distance sweep
+
+Date: 2026-10-31. Source: Y14 at 1280x800 with no vendor commands, using a flat box
+square-on to the scanner. Distances are approximate and the first was not confirmed.
+
+| Distance | Box value | Frame with depth |
+|---|---|---|
+| About 20 cm | About 8813 (5th-95th percentile 8750-8878) | 51.5% |
+| About 30 cm | About 1034 (994-1085) | 31.7% |
+| About 40 cm | No depth anywhere in the frame | 0% |
+
+- Depth stops completely between about 30 and 40 cm in this mode. Fitting
+  `value = K / distance - c` to the first two rows puts value 0 at about 32 cm. That
+  replaces the 35-40 cm estimate, but depends on the unconfirmed first distance.
+- Listings quote 70 cm, so either something the official app does extends the range
+  or the listings are wrong. Unknown which.
+- The 50 and 60 cm positions were skipped because 40 cm was already empty.
