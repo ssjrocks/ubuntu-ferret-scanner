@@ -93,4 +93,18 @@ All code here must be written independently. See
 
 ## Licence
 
-Not chosen yet. All rights reserved until a licence is added.
+Copyright (C) 2026 ssjrocks. Released under the GNU General Public License v3.0 only. See
+[LICENSE](LICENSE).
+
+Main dependencies and their licences:
+
+| Dependency | Licence |
+|---|---|
+| PyQt6 | GPL-3.0-only |
+| libusb 1.0 | LGPL-2.1, linked dynamically |
+| PyTorch | BSD-style, with Apache-2.0 and other bundled licences |
+| NumPy, SciPy, scikit-image, PyOpenGL | BSD-style |
+| Pillow | MIT-CMU |
+
+The scanner command format follows Orbbec SDK v2, whose core is under the MIT licence,
+Copyright (c) 2024-2026 Orbbec Inc. Its binary extension libraries are not used.
