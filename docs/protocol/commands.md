@@ -175,3 +175,8 @@ tape's 1/16-inch ticks are 4.948 px apart at 1920x1080, so 3.117 px per mm at ab
   length of about 983-1004. The stored value is 956.8. Depth edges often read slightly
   wide, so this is an upper estimate.
 - Colour focal length is about 1284 px at 1920x1080. Measured from one distance only.
+- A tape across the box measured 78-79 mm, which matches the 78.3 mm worked out from
+  the colour image.
+- Using that width, the 186 px IR width and the 41 cm tape distance gives a focal length
+  of about 965-978, or 1-2% above the stored value. That is within this method's error,
+  so the stored 956.8 is kept.
