@@ -16,6 +16,9 @@ add_compile_options(-Wall -Wextra)
 add_executable(ferret-capture ferret_capture.cpp)
 target_link_libraries(ferret-capture PRIVATE PkgConfig::LIBUSB)
 
+add_executable(ferret-props ferret_props.cpp)
+target_link_libraries(ferret-props PRIVATE PkgConfig::LIBUSB)
+
 enable_testing()
 add_executable(test-uvc-payload test_uvc_payload.cpp)
 target_compile_options(test-uvc-payload PRIVATE -UNDEBUG)

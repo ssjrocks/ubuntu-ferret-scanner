@@ -72,7 +72,7 @@ of 62 fields, 32 bits each. The data layout has not been read.
 - What are the units of Y14 depth, and how do values map to distance?
 - What sets the depth working range, and can it be widened?
 - Where is the factory calibration stored, and how is it read?
-- Does valid depth need vendor commands first?
+- What does the official app change to reach past 40 cm? See `commands.md`.
 - How does the WiFi bridge carry the data?
 
 ## First stream test
@@ -182,7 +182,8 @@ Next test: keep the scanner still and move a flat card to several measured dista
 ## Distance sweep
 
 Date: 2026-10-31. Source: Y14 at 1280x800 with no vendor commands, using a flat box
-square-on to the scanner. Distances are approximate and the first was not confirmed.
+square-on to the scanner. Distances are tape measurements from the box to the middle
+of the scanner.
 
 | Distance | Box value | Frame with depth |
 |---|---|---|
@@ -192,7 +193,7 @@ square-on to the scanner. Distances are approximate and the first was not confir
 
 - Depth stops completely between about 30 and 40 cm in this mode. Fitting
   `value = K / distance - c` to the first two rows puts value 0 at about 32 cm. That
-  replaces the 35-40 cm estimate, but depends on the unconfirmed first distance.
-- Listings quote 70 cm, so either something the official app does extends the range
-  or the listings are wrong. Unknown which.
+  replaces the 35-40 cm estimate.
+- The official app reaches past 40 cm according to the owner, so something beyond the
+  default stream state sets the range. What that is remains unknown.
 - The 50 and 60 cm positions were skipped because 40 cm was already empty.

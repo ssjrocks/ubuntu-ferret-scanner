@@ -23,7 +23,8 @@ repo. It is never pushed anywhere.
 
 Prefer sources in this order:
 
-1. Public documentation, standards and open-source SDKs.
+1. Public documentation, standards and open-source SDKs. Check each SDK's licence
+   first: Orbbec SDK v2's core is MIT, but its `extensions` binaries have other terms.
 2. The device's own behaviour: USB descriptors, and USB or network traffic.
 3. The official app's interfaces, using inspection of only what interoperability
    needs: imports, exports, strings and the specific protocol code.

@@ -44,5 +44,13 @@ Then unplug and replug the scanner.
 This writes `capture.raw` (frames back to back) and `capture.csv` (one row per
 frame). Keep captures outside the repo.
 
+To read scanner settings without changing them:
+
+```bash
+./build/ferret-props
+```
+
+It sends get-property requests only. See `docs/protocol/commands.md`.
+
 While it runs, the tool takes that camera from the Linux driver and gives it back on
 exit. If the tool is killed, replug the scanner to restore it.
