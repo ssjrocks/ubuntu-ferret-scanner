@@ -53,9 +53,9 @@ Rotation between the cameras is under 0.14 degrees. Translation is 19.47, -0.19 
   lengths. The stored colour values may belong to another colour setup. Unknown.
 - The first few 1280x800 MJPEG frames did not decode, so discard them.
 
-## Width finding
+## Depth edge spreading
 
-The box's colour-to-depth width ratio stayed at 0.861-0.862 from 189 to 382 depth pixels wide.
-Fixed-size edge spreading would change that ratio, so edge blur is unlikely to explain the
-box reading 4-5% wide. The stored focal length gives 80-82 mm against 78-79 mm by tape, so
-the cause is still unknown.
+The box's depth width was measured at about 20, 30 and 41 cm, and fitted as true width plus a
+fixed pixel error. That gave 78.7 mm against 79 mm by tape, plus 6.8 px of spread, with all
+three distances within 0.3 px. Near objects therefore read about 3.4 px too wide on each side.
+This replaces an earlier note that ruled out fixed edge spreading: that argument was wrong.

@@ -168,3 +168,21 @@ The 30-second scan reached 0.63 mm and 9.58 million triangles in 71 s, with 9.32
 - Fine colour detail, such as key lettering, remains soft.
 - Colour still carries room lighting, including the green RGB glow.
 - Accuracy against a reference is not measured.
+
+## Box size check
+
+Date: 2026-10-31. Source: a tape-measured box, 79 x 30 mm, against saved depth frames after
+removing edge pixels. The edge window was tuned on these same frames, so this is not independent.
+
+| Distance | Width | Tape |
+|---|---|---|
+| About 20 cm | 78.5 mm | 79 mm |
+| About 30 cm | 78.2 mm | 79 mm |
+| About 41 cm | 78.7 mm | 79 mm |
+
+- The box's 3 cm depth read 31.6 mm at about 32.5 cm.
+- Its long side read 120.2 mm. The tape note gave 22 cm, which doesn't match. Needs rechecking.
+- A bug had let pixels beside holes through the edge filter. A test now covers that.
+- With the 5-pixel window, the 74-second scan builds at 0.7 mm, with 9.09 million triangles in
+  211 s and a peak of 9.37 GB of GPU memory.
+- One object is not a general accuracy figure. Keyboard scale has not been remeasured.

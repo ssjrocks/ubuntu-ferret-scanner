@@ -10,10 +10,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ubuntu_ferret_scanner import calibration, ply
 from ubuntu_ferret_scanner.reconstruct import (
     BRICK_VOXELS,
+    EDGE_WINDOW,
     MIN_PIECE_FACES,
     SparseVolume,
     choose_voxel,
     extract_mesh,
+    remove_edges,
     remove_small_pieces,
 )
 from ubuntu_ferret_scanner.settings import RESERVED_THREADS, Settings
@@ -99,6 +101,23 @@ class Resources(unittest.TestCase):
         self.assertEqual(choose_voxel(surface, chosen, device), 3.0)
         with self.assertRaises(RuntimeError):
             choose_voxel(surface, Settings(use_gpu=True, vram_limit_gb=0.1, voxel_mm=0.5), device)
+
+
+class Edges(unittest.TestCase):
+    def test_pixels_beside_holes_and_jumps_are_removed(self):
+        depth = torch.full((40, 60), 300.0)
+        depth[:, 30:] = float("nan")
+        depth[:, :10] = 500.0
+        clean = remove_edges(depth)
+        margin = EDGE_WINDOW // 2
+        row = clean[20].isnan().tolist()
+        self.assertTrue(all(row[30 - margin : 30]))
+        self.assertTrue(all(row[10 - margin : 10 + margin]))
+        self.assertFalse(row[20])
+
+    def test_flat_surface_is_untouched(self):
+        clean = remove_edges(torch.full((40, 60), 300.0))
+        self.assertEqual(int(clean.isnan().sum()), 0)
 
 
 class Volume(unittest.TestCase):

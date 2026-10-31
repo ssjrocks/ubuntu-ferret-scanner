@@ -71,7 +71,7 @@ TRUNCATION_MM = 3.0
 MIN_TRUNCATION_VOXELS = 3
 MIN_WEIGHT = 6.0
 MIN_PIECE_FACES = 300
-EDGE_WINDOW = 5
+EDGE_WINDOW = 5  # near objects read about 3.4 pixels too wide on each side
 EDGE_LIMIT_MM = 6.0
 COLOUR_BAND_VOXELS = 1.5
 MIN_FACING = 0.25
@@ -101,11 +101,11 @@ class DepthFrames:
 
 def remove_edges(depth):
     """Drops pixels beside depth jumps and holes, where stereo matching is unreliable."""
-    near = depth.nan_to_num(nan=0.0)[None, None]
-    far = depth.nan_to_num(nan=1e5)[None, None]
+    holes_far = depth.nan_to_num(nan=1e5)[None, None]
+    holes_near = depth.nan_to_num(nan=0.0)[None, None]
     padding = EDGE_WINDOW // 2
-    highest = F.max_pool2d(near, EDGE_WINDOW, 1, padding)
-    lowest = -F.max_pool2d(-far, EDGE_WINDOW, 1, padding)
+    highest = F.max_pool2d(holes_far, EDGE_WINDOW, 1, padding)
+    lowest = -F.max_pool2d(-holes_near, EDGE_WINDOW, 1, padding)
     return torch.where((highest - lowest)[0, 0] > EDGE_LIMIT_MM, float("nan"), depth)
 
 
