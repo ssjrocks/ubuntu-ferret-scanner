@@ -22,6 +22,10 @@ target_link_libraries(ferret-props PRIVATE PkgConfig::LIBUSB)
 add_executable(ferret-mode ferret_mode.cpp)
 target_link_libraries(ferret-mode PRIVATE PkgConfig::LIBUSB)
 
+add_library(ferretstream SHARED ferret_stream.cpp)
+target_compile_options(ferretstream PRIVATE -fvisibility=default)
+target_link_libraries(ferretstream PRIVATE PkgConfig::LIBUSB pthread)
+
 enable_testing()
 add_executable(test-uvc-payload test_uvc_payload.cpp)
 target_compile_options(test-uvc-payload PRIVATE -UNDEBUG)

@@ -1,0 +1,414 @@
+"""Builds a coloured point cloud and a mesh from a recorded session.
+
+Runs as its own process so the app stays responsive. Each line of stdout is a JSON message.
+Fusion is a truncated signed distance field (Curless and Levoy), meshed by marching cubes.
+"""
+import argparse
+import io
+import json
+import sys
+import time
+
+import numpy as np
+import torch
+from PIL import Image, ImageFilter
+from skimage import measure
+
+from ubuntu_ferret_scanner.calibration import (
+    CENTRE_X,
+    CENTRE_Y,
+    COLOUR_SIZE,
+    DEPTH_BYTES,
+    FOCAL,
+    HEIGHT,
+    MODE_OFFSETS,
+    WIDTH,
+    decode_y14,
+    project_to_colour,
+    to_depth_mm,
+)
+from ubuntu_ferret_scanner.pose_graph import edge_error, optimize
+from ubuntu_ferret_scanner.ply import camera_to_view, write_cloud, write_mesh, write_stl
+from ubuntu_ferret_scanner.session import ColourFrames, Session, read_index
+from ubuntu_ferret_scanner.settings import Settings, device_for
+from ubuntu_ferret_scanner.tracking import (
+    DOWNSCALES,
+    Tracker,
+    icp_level,
+    relative_angle,
+)
+
+LOOP_GAP_KEYFRAMES = 15
+LOOP_DISTANCE_MM = 150.0
+LOOP_ANGLE_RAD = 0.5
+LOOP_CANDIDATES = 3
+LOOP_SEARCH_MM = 40.0
+LOOP_INLIERS = 0.45
+LOOP_RMS_MM = 1.5
+LOOP_MIN_CONDITION = 0.02
+LOOP_WEIGHT = 10.0
+
+CLOUD_VOXEL_MM = 1.5
+MERGE_BATCH_POINTS = 30_000_000
+CLOUD_PIXEL_STEP = 2
+COLOUR_MARGIN = 80
+MIN_VOTES = 2
+
+EDGE_JUMP_MM = 12.0
+SYNC_FRAMES = 24
+SYNC_RANGE_MS = 600
+SYNC_STEP_MS = 33
+
+BYTES_PER_VOXEL = 20
+VOLUME_SHARE = 0.6  # the rest is working memory for each frame
+MIN_VOXEL_MM = 0.75
+TRUNCATION_VOXELS = 4
+MIN_WEIGHT = 3.0
+BOUNDS_MARGIN_MM = 15.0
+
+
+def say(stage, progress=None, **extra):
+    print(json.dumps({"stage": stage, "progress": progress, **extra}), flush=True)
+
+
+class DepthFrames:
+    def __init__(self, session, offset, device):
+        self.file = open(session.depth_path, "rb")
+        self.offset = offset
+        self.device = device
+
+    def read(self, index):
+        self.file.seek(index * DEPTH_BYTES)
+        data = self.file.read(DEPTH_BYTES)
+        raw = torch.frombuffer(bytearray(data), dtype=torch.uint8).to(self.device)
+        return to_depth_mm(decode_y14(raw), self.offset)
+
+
+def find_loops(keyframes, newest):
+    """Matches the newest keyframe against earlier ones near it on the tracked path."""
+    latest = keyframes[newest]
+    scored = []
+    for i in range(newest - LOOP_GAP_KEYFRAMES):
+        relative = torch.linalg.inv(keyframes[i]["pose"]) @ latest["pose"]
+        distance = float(relative[:3, 3].norm())
+        if distance < LOOP_DISTANCE_MM and relative_angle(relative) < LOOP_ANGLE_RAD:
+            scored.append((distance, i, relative))
+
+    loops = []
+    for _, i, relative in sorted(scored, key=lambda item: item[0])[:LOOP_CANDIDATES]:
+        T = relative
+        finest = DOWNSCALES[-1]
+        for factor in DOWNSCALES:
+            T, inliers, _, _ = icp_level(
+                latest["levels"][factor], keyframes[i]["levels"][factor], T, LOOP_SEARCH_MM
+            )
+            if inliers == 0.0:
+                break
+        T, inliers, rms, condition = icp_level(latest["levels"][finest], keyframes[i]["levels"][finest], T)
+        if inliers >= LOOP_INLIERS and rms <= LOOP_RMS_MM and condition >= LOOP_MIN_CONDITION:
+            loops.append((i, newest, T.cpu().numpy()))
+    return loops
+
+
+def align(depth_frames, count, device):
+    """Tracks every frame and closes loops. Returns poses as {frame: 4x4 array}, and stats."""
+    tracker = Tracker(device)
+    keyframes, edges, loops, placed = [], [], [], {}
+    lost = 0
+    for i in range(count):
+        depth = depth_frames.read(i)
+        if float((~depth.isnan()).float().mean()) < 0.05:
+            continue
+        T_before = tracker.T_key.clone()
+        result, levels = tracker.feed(depth)
+        if result.state == "first":
+            keyframes.append({"pose": result.pose, "levels": levels})
+            placed[i] = (0, torch.eye(4, dtype=torch.float64, device=device))
+            continue
+        if result.state == "lost":
+            lost += 1
+            continue
+
+        if result.new_keyframe:
+            relative = torch.linalg.inv(keyframes[-1]["pose"]) @ result.pose
+            edges.append((len(keyframes) - 1, len(keyframes), relative.cpu().numpy(), 1.0))
+            keyframes.append({"pose": result.pose, "levels": levels})
+            placed[i] = (len(keyframes) - 1, torch.eye(4, dtype=torch.float64, device=device))
+            loops.extend(find_loops(keyframes, len(keyframes) - 1))
+        else:
+            placed[i] = (len(keyframes) - 1, tracker.T_key.clone())
+        if i % 20 == 0:
+            say("Aligning frames", i / count)
+
+    tracked = [k["pose"].cpu().numpy() for k in keyframes]
+    gaps = [float(np.linalg.norm(edge_error(tracked[i], tracked[j], m)[3:])) for i, j, m in loops]
+    corrected = tracked
+    if loops:
+        corrected = optimize(tracked, edges + [(i, j, m, LOOP_WEIGHT) for i, j, m in loops])
+    poses = {i: corrected[key] @ T.cpu().numpy() for i, (key, T) in placed.items()}
+    return poses, {"lost": lost, "loops": len(loops), "largest_gap_mm": max(gaps, default=0.0)}
+
+
+def load_edges(data):
+    try:
+        gray = Image.open(io.BytesIO(data)).convert("L").resize((960, 540))
+    except OSError:
+        return None
+    a = np.asarray(gray, dtype=np.float32)
+    edges = np.abs(np.gradient(a, axis=0)) + np.abs(np.gradient(a, axis=1))
+    blurred = Image.fromarray(np.clip(edges * 3, 0, 255).astype(np.uint8)).filter(ImageFilter.BoxBlur(1))
+    return np.asarray(blurred, dtype=np.float32)
+
+
+def depth_edges(depth):
+    """Points on the near side of depth jumps, in depth camera space."""
+    z = depth.nan_to_num(nan=1e4)
+    jump = torch.zeros_like(z, dtype=torch.bool)
+    dx, dy = (z[:, :-1] - z[:, 1:]), (z[:-1, :] - z[1:, :])
+    jump[:, :-1] |= dx < -EDGE_JUMP_MM
+    jump[:, 1:] |= dx > EDGE_JUMP_MM
+    jump[:-1, :] |= dy < -EDGE_JUMP_MM
+    jump[1:, :] |= dy > EDGE_JUMP_MM
+    rows, cols = (jump & ~depth.isnan()).nonzero(as_tuple=True)
+    d = depth[rows, cols]
+    return torch.stack(((cols - CENTRE_X) * d / FOCAL, (rows - CENTRE_Y) * d / FOCAL, d), dim=1)
+
+
+def find_time_shift(depth_frames, depth_ms, colour, poses):
+    """Finds the shift to add to colour times, by landing depth edges on colour edges."""
+    ordered = sorted(poses)
+    speed = {b: float(np.linalg.norm(poses[b][:3, 3] - poses[a][:3, 3])) for a, b in zip(ordered, ordered[1:])}
+    fastest = sorted(speed, key=speed.get, reverse=True)[: SYNC_FRAMES * 3]
+    prepared = []
+    for i in sorted(fastest)[:: 3]:
+        edges = depth_edges(depth_frames.read(i))
+        if edges.shape[0] < 500:
+            continue
+        u, v = project_to_colour(edges)
+        c, r = (u / 2).round().long(), (v / 2).round().long()
+        keep = (c >= 0) & (c < 960) & (r >= 0) & (r < 540)
+        prepared.append((i, r[keep].cpu().numpy(), c[keep].cpu().numpy()))
+
+    cache, scores = {}, {}
+    for shift in range(-SYNC_RANGE_MS, SYNC_RANGE_MS + 1, SYNC_STEP_MS):
+        totals = []
+        for i, r, c in prepared:
+            n = colour.nearest(depth_ms[i] - shift)
+            if n not in cache:
+                cache[n] = load_edges(colour.read(n))
+            if cache[n] is not None:
+                totals.append(cache[n][r, c].mean())
+        if totals:
+            scores[shift] = float(np.mean(totals))
+    if not scores:
+        return 0.0
+    best = max(scores, key=scores.get)
+    # An edge result means the true shift is outside the search, so keep the recorded timing.
+    return 0.0 if abs(best) >= SYNC_RANGE_MS - SYNC_STEP_MS else float(best)
+
+
+def decode_colour(colour, index, device):
+    try:
+        picture = np.asarray(Image.open(io.BytesIO(colour.read(index))).convert("RGB"))
+    except OSError:
+        return None
+    return torch.from_numpy(picture.copy()).to(device)
+
+
+def frame_colours(camera, picture):
+    """Colours for camera-space points, and which points the colour camera saw."""
+    u, v = project_to_colour(camera)
+    u, v = u.round().long(), v.round().long()
+    seen = (u >= COLOUR_MARGIN) & (u < COLOUR_SIZE[0] - COLOUR_MARGIN)
+    seen &= (v >= COLOUR_MARGIN) & (v < COLOUR_SIZE[1] - COLOUR_MARGIN)
+    return picture[v[seen], u[seen]].float(), seen
+
+
+def camera_points(depth, step):
+    rows, cols = (~depth.isnan()).nonzero(as_tuple=True)
+    rows, cols = rows[::step], cols[::step]
+    z = depth[rows, cols]
+    return torch.stack(((cols - CENTRE_X) * z / FOCAL, (rows - CENTRE_Y) * z / FOCAL, z), dim=1)
+
+
+class VoxelMerger:
+    """Merges points into voxels in batches, so memory follows surface size, not frame count."""
+
+    def __init__(self, device):
+        self.device = device
+        self.keys = torch.empty(0, dtype=torch.int64, device=device)
+        self.sums = torch.empty(0, 6, dtype=torch.float64, device=device)
+        self.counts = torch.empty(0, dtype=torch.int64, device=device)
+        self.pending = []
+        self.pending_points = 0
+
+    def add(self, points, colours):
+        self.pending.append(torch.cat((points, colours), dim=1).cpu())
+        self.pending_points += points.shape[0]
+        if self.pending_points >= MERGE_BATCH_POINTS:
+            self.merge()
+
+    def merge(self):
+        if not self.pending:
+            return
+        batch = torch.cat(self.pending).to(self.device)
+        self.pending, self.pending_points = [], 0
+        k = (batch[:, :3] / CLOUD_VOXEL_MM).floor().long() + 200000
+        keys = k[:, 0] * 400000**2 + k[:, 1] * 400000 + k[:, 2]
+        merged_keys, inverse = torch.unique(torch.cat((self.keys, keys)), return_inverse=True)
+        sums = torch.zeros(merged_keys.numel(), 6, dtype=torch.float64, device=self.device)
+        counts = torch.zeros(merged_keys.numel(), dtype=torch.int64, device=self.device)
+        old = self.keys.numel()
+        sums.index_add_(0, inverse[:old], self.sums)
+        sums.index_add_(0, inverse[old:], batch.double())
+        counts.index_add_(0, inverse[:old], self.counts)
+        counts.index_add_(0, inverse[old:], torch.ones(keys.numel(), dtype=torch.int64, device=self.device))
+        self.keys, self.sums, self.counts = merged_keys, sums, counts
+
+    def result(self):
+        self.merge()
+        keep = self.counts >= MIN_VOTES
+        mean = (self.sums[keep] / self.counts[keep][:, None]).float()
+        return mean[:, :3].cpu().numpy(), mean[:, 3:].clamp(0, 255).byte().cpu().numpy()
+
+
+def build_cloud(depth_frames, colour, depth_ms, poses, shift, stride, device):
+    merger = VoxelMerger(device)
+    chosen = sorted(poses)[:: stride]
+    for number, i in enumerate(chosen):
+        camera = camera_points(depth_frames.read(i), CLOUD_PIXEL_STEP)
+        picture = decode_colour(colour, colour.nearest(depth_ms[i] - shift), device)
+        if picture is None:
+            continue
+        rgb, seen = frame_colours(camera, picture)
+        pose = torch.from_numpy(poses[i]).to(device).float()
+        merger.add(camera[seen] @ pose[:3, :3].T + pose[:3, 3], rgb)
+        if number % 10 == 0:
+            say("Building point cloud", number / len(chosen))
+    points, colours = merger.result()
+    del merger
+    torch.cuda.empty_cache()
+    return points, colours
+
+
+def choose_voxel(extent, settings):
+    limit = settings.vram_limit_gb if settings.use_gpu else settings.ram_limit_gb
+    budget = limit * 1024**3 * VOLUME_SHARE
+    volume = float(np.prod(extent))
+    fitted = (volume * BYTES_PER_VOXEL / budget) ** (1 / 3)
+    wanted = settings.voxel_mm if settings.voxel_mm > 0 else MIN_VOXEL_MM
+    return max(fitted, wanted, MIN_VOXEL_MM)
+
+
+def fuse(depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device):
+    low = torch.tensor(np.percentile(cloud, 0.1, axis=0) - BOUNDS_MARGIN_MM, device=device).float()
+    high = torch.tensor(np.percentile(cloud, 99.9, axis=0) + BOUNDS_MARGIN_MM, device=device).float()
+    voxel = choose_voxel((high - low).cpu().numpy(), settings)
+    dims = ((high - low) / voxel).ceil().long()
+    nx, ny, nz = dims.tolist()
+    count = nx * ny * nz
+    say("Fusing surfaces", 0.0, voxel_mm=round(voxel, 2), voxels=count)
+
+    sdf_sum = torch.zeros(count, device=device, dtype=torch.float32)
+    weight = torch.zeros(count, device=device, dtype=torch.float32)
+    colour_sum = torch.zeros(count, 3, device=device, dtype=torch.float32)
+
+    truncation = voxel * TRUNCATION_VOXELS
+    offsets = torch.arange(-TRUNCATION_VOXELS, TRUNCATION_VOXELS + 1, device=device).float() * voxel
+    chosen = sorted(poses)[:: stride]
+    for number, i in enumerate(chosen):
+        camera = camera_points(depth_frames.read(i), 1)
+        picture = decode_colour(colour, colour.nearest(depth_ms[i] - shift), device)
+        if picture is None:
+            continue
+        rgb, seen = frame_colours(camera, picture)
+        camera = camera[seen]
+        pose = torch.from_numpy(poses[i]).to(device).float()
+        scale = 1 + offsets[None, :] / camera[:, 2:3]  # steps along each pixel's ray
+        samples = camera[:, None, :] * scale[:, :, None]
+        world = samples.reshape(-1, 3) @ pose[:3, :3].T + pose[:3, 3]
+        cell = ((world - low) / voxel).floor().long()
+        inside = ((cell >= 0) & (cell < dims)).all(dim=1)
+        index = (cell[:, 0] * ny + cell[:, 1]) * nz + cell[:, 2]
+        index = index[inside]
+        distance = (-offsets / truncation).repeat(camera.shape[0])[inside]
+        sdf_sum.index_add_(0, index, distance)
+        weight.index_add_(0, index, torch.ones_like(distance))
+        colour_sum.index_add_(0, index, rgb.repeat_interleave(offsets.numel(), dim=0)[inside])
+        if number % 10 == 0:
+            say("Fusing surfaces", number / len(chosen))
+
+    return sdf_sum, weight, colour_sum, low, voxel, (nx, ny, nz)
+
+
+def extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape):
+    say("Extracting mesh", None)
+    measured = weight >= MIN_WEIGHT
+    field = torch.where(measured, sdf_sum / weight.clamp(min=1), torch.ones_like(sdf_sum))
+    field_cpu = field.reshape(shape).cpu().numpy()
+    mask = measured.reshape(shape).cpu().numpy()
+    vertices, faces, normals, _ = measure.marching_cubes(field_cpu, 0.0, mask=mask, allow_degenerate=False)
+    faces = faces.astype(np.int32)
+
+    cells = np.round(vertices).astype(np.int64)
+    cells = np.minimum(cells, np.array(shape) - 1)
+    index = torch.from_numpy((cells[:, 0] * shape[1] + cells[:, 1]) * shape[2] + cells[:, 2]).to(sdf_sum.device)
+    rgb = colour_sum[index] / weight[index].clamp(min=1)[:, None]
+    world = vertices.astype(np.float32) * voxel + low.cpu().numpy()
+    return world, normals.astype(np.float32), rgb.clamp(0, 255).byte().cpu().numpy(), faces
+
+
+def build(folder, settings):
+    started = time.time()
+    device = device_for(settings)
+    torch.set_num_threads(settings.cpu_threads)
+    session = Session(folder)
+    offset = MODE_OFFSETS[session.mode]
+    depth_ms, _ = read_index(session.depth_index)
+    count = len(depth_ms)
+    depth_frames = DepthFrames(session, offset, device)
+    colour = ColourFrames(session)
+
+    say("Aligning frames", 0.0)
+    poses, stats = align(depth_frames, count, device)
+    with open(session.poses_path, "w") as f:
+        for i in sorted(poses):
+            f.write(f"{i}," + ",".join(f"{x:.9g}" for x in poses[i].ravel()) + "\n")
+
+    say("Matching colour timing", None)
+    shift = find_time_shift(depth_frames, depth_ms, colour, poses)
+
+    stride = max(settings.build_frame_stride, 1)
+    cloud, cloud_rgb = build_cloud(depth_frames, colour, depth_ms, poses, shift, stride, device)
+    write_cloud(session.cloud_path, camera_to_view(cloud), cloud_rgb)
+    say("Point cloud ready", 1.0, cloud=str(session.cloud_path), points=len(cloud))
+
+    sdf_sum, weight, colour_sum, low, voxel, shape = fuse(
+        depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device
+    )
+    vertices, normals, rgb, faces = extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape)
+    vertices, normals = camera_to_view(vertices), camera_to_view(normals)
+    write_mesh(session.mesh_path, vertices, normals, rgb, faces)
+    write_stl(session.stl_path, vertices, faces)
+
+    summary = {
+        "frames": count, "aligned": len(poses), "points": len(cloud), "vertices": len(vertices),
+        "triangles": len(faces), "voxel_mm": round(voxel, 2), "colour_shift_ms": shift,
+        "seconds": round(time.time() - started, 1),
+        "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 2) if device.type == "cuda" else 0,
+        **stats,
+    }
+    session.folder.joinpath("build.json").write_text(json.dumps(summary, indent=2))
+    say("Done", 1.0, mesh=str(session.mesh_path), cloud=str(session.cloud_path), summary=summary)
+
+
+def main(arguments):
+    parser = argparse.ArgumentParser(prog="ubuntu-ferret-scanner build")
+    parser.add_argument("session")
+    args = parser.parse_args(arguments)
+    build(args.session, Settings.load())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

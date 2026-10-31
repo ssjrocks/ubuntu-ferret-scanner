@@ -3,8 +3,22 @@
 An independent, native Ubuntu app for the Creality Ferret 3D scanner, over USB
 and WiFi.
 
-**Status: nothing works yet.** No code exists, and no part of the scanner has
-been tested on Linux from this project.
+**Status: early.** USB scanning, the live cloud and model building run on Ubuntu, tested
+mainly on one Ferret Pro. WiFi and the motion sensor are not done. Calibration values are
+currently built in from that one scanner, so another scanner would need its own.
+
+## Run it
+
+```bash
+scripts/install-dev.sh
+```
+
+Then start Ubuntu Ferret Scanner from the app menu. Connecting turns on the scanner's
+projector, so keep it pointed away from eyes. RGB lighting and coloured screens tint the
+textures, so plain white light gives truer colours.
+
+Scans are saved as they are recorded to `~/FerretScans`, and models are built from them
+afterwards. A CUDA GPU is strongly recommended.
 
 This project is not affiliated with or endorsed by Creality. "Creality" and
 "Ferret" are used only to say which hardware this works with.

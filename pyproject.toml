@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Independent Ubuntu app for the Creality Ferret 3D scanner"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=11",
+    "PyOpenGL>=3.1.7",
+    "PyQt6>=6.8",
+    "scikit-image>=0.25",
+    "torch>=2.7",
+]
 
 [project.scripts]
 ubuntu-ferret-scanner = "ubuntu_ferret_scanner.main:main"

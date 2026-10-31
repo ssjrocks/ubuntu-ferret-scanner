@@ -1,4 +1,4 @@
-"""Command-line entry point. The scanning app will grow from here."""
+"""Starts the app, or runs one of its command-line tasks."""
 
 import argparse
 import logging
@@ -49,12 +49,19 @@ def report_problem(note: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="ubuntu-ferret-scanner")
     parser.add_argument("--version", action="version", version=__version__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
     update = commands.add_parser("update", help="check GitHub for a newer release")
     update.add_argument("--install", action="store_true", help="install a newer release")
     report = commands.add_parser("report", help="report a problem to the developer")
     report.add_argument("note")
+    build = commands.add_parser("build", help="build the models for a saved scan")
+    build.add_argument("session")
     args = parser.parse_args()
+
+    if args.command == "build":
+        from ubuntu_ferret_scanner import reconstruct
+
+        return reconstruct.main([args.session])
 
     folder = state_dir()
     log_file = folder / "app.log"
@@ -64,4 +71,9 @@ def main() -> int:
 
     if args.command == "update":
         return check_update(args.install)
-    return report_problem(args.note)
+    if args.command == "report":
+        return report_problem(args.note)
+
+    from ubuntu_ferret_scanner.gui.app import run
+
+    return run()

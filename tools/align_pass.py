@@ -8,10 +8,13 @@ earlier keyframes. Lens values are the scanner's factory calibration.
 import argparse
 import csv
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 
-from pose_graph import edge_error, optimize
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from ubuntu_ferret_scanner.pose_graph import edge_error, optimize
 from depth_to_cloud import (BASELINE, CENTRE_X, CENTRE_Y, FOCAL, FRAME_BYTES, HEIGHT, MODE_OFFSETS,
                            UNIT, WIDTH, render, write_ply)
 

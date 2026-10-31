@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
-from pose_graph import edge_error, exp_se3, log_se3, optimize
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from ubuntu_ferret_scanner.pose_graph import edge_error, exp_se3, log_se3, optimize
 
 
 def circle_poses(count, radius=300.0):
