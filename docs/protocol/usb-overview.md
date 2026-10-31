@@ -143,3 +143,17 @@ Date: 2026-10-31. Source: `tools/ferret-capture`, with layouts scored by
   failed depth transfers. The scanner was facing a distant ceiling, so depth quality
   under this load is untested.
 - Depth Y10 was not repeated after the resync fix, so its depth content is untested.
+
+## Desk scene test
+
+Date: 2026-10-31. Source: `ferret-capture`, scanner propped on a desk and facing
+objects at mixed distances. Actual distances were not measured.
+
+- Depth Y14 ran at 29.3 fps with 2 frames dropped at the start. Object edges are
+  sharp. A box, a bottle and a drawer unit are clearly separated.
+- About 11% of the frame had depth, and the first sampled frame had 5%. Values
+  ranged from about 6 to 9000 (1st to 99th percentile), with nearer objects higher.
+- The IR image is mirrored left to right compared with colour and depth.
+- IR showed dots on many surfaces with no depth, including part of a shelf and a blue
+  plastic tub that looked about as near as the box. A distance limit may not be
+  the whole explanation. Surface type or a setting could also play a part.
