@@ -12,6 +12,8 @@ import time
 import numpy as np
 import torch
 from PIL import Image, ImageFilter
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 from skimage import measure
 
 from ubuntu_ferret_scanner.calibration import (
@@ -31,22 +33,22 @@ from ubuntu_ferret_scanner.pose_graph import edge_error, optimize
 from ubuntu_ferret_scanner.ply import camera_to_view, write_cloud, write_mesh, write_stl
 from ubuntu_ferret_scanner.session import ColourFrames, Session, read_index
 from ubuntu_ferret_scanner.settings import Settings, device_for
-from ubuntu_ferret_scanner.tracking import (
-    DOWNSCALES,
-    Tracker,
-    icp_level,
-    relative_angle,
-)
+from ubuntu_ferret_scanner.tracking import DOWNSCALES, Tracker, icp_level
 
-LOOP_GAP_KEYFRAMES = 15
+LOOP_GAP_KEYFRAMES = 6
 LOOP_DISTANCE_MM = 150.0
 LOOP_ANGLE_RAD = 0.5
-LOOP_CANDIDATES = 3
 LOOP_SEARCH_MM = 40.0
 LOOP_INLIERS = 0.45
 LOOP_RMS_MM = 1.5
 LOOP_MIN_CONDITION = 0.02
-LOOP_WEIGHT = 10.0
+LOOP_WEIGHT = 1.0
+REFINE_SEARCH_MM = (40.0, 25.0, 15.0, 10.0)
+REFINE_CANDIDATES = 6
+MAX_LOOP_ERROR_MM = 6.0
+MAX_LOOP_ERROR_RAD = 0.02
+RELOCALISE_EVERY = 5
+RELOCALISE_KEYFRAMES = 60
 
 CLOUD_VOXEL_MM = 1.5
 MERGE_BATCH_POINTS = 30_000_000
@@ -63,7 +65,8 @@ BYTES_PER_VOXEL = 20
 VOLUME_SHARE = 0.6  # the rest is working memory for each frame
 MIN_VOXEL_MM = 0.75
 TRUNCATION_VOXELS = 4
-MIN_WEIGHT = 3.0
+MIN_WEIGHT = 6.0
+MIN_PIECE_FACES = 300
 BOUNDS_MARGIN_MM = 15.0
 
 
@@ -84,42 +87,98 @@ class DepthFrames:
         return to_depth_mm(decode_y14(raw), self.offset)
 
 
-def find_loops(keyframes, newest):
-    """Matches the newest keyframe against earlier ones near it on the tracked path."""
-    latest = keyframes[newest]
-    scored = []
-    for i in range(newest - LOOP_GAP_KEYFRAMES):
-        relative = torch.linalg.inv(keyframes[i]["pose"]) @ latest["pose"]
-        distance = float(relative[:3, 3].norm())
-        if distance < LOOP_DISTANCE_MM and relative_angle(relative) < LOOP_ANGLE_RAD:
-            scored.append((distance, i, relative))
+def match_keyframes(a, b, guess, search_mm):
+    """Refines the transform from keyframe b to a. Returns it if the match is trustworthy."""
+    T = guess
+    finest = DOWNSCALES[-1]
+    for factor in DOWNSCALES:
+        T, inliers, _, _ = icp_level(b["levels"][factor], a["levels"][factor], T, search_mm)
+        if inliers == 0.0:
+            return None
+    T, inliers, rms, condition = icp_level(b["levels"][finest], a["levels"][finest], T)
+    if inliers >= LOOP_INLIERS and rms <= LOOP_RMS_MM and condition >= LOOP_MIN_CONDITION:
+        return T
+    return None
 
-    loops = []
-    for _, i, relative in sorted(scored, key=lambda item: item[0])[:LOOP_CANDIDATES]:
-        T = relative
-        finest = DOWNSCALES[-1]
+
+def overlapping(keyframes, poses, j, limit):
+    """Earlier keyframes likely to see the same surfaces as keyframe j, nearest first."""
+    scored = []
+    for i in range(j - LOOP_GAP_KEYFRAMES):
+        relative = np.linalg.inv(poses[i]) @ poses[j]
+        distance = float(np.linalg.norm(relative[:3, 3]))
+        angle = float(np.arccos(np.clip((np.trace(relative[:3, :3]) - 1) / 2, -1, 1)))
+        if distance < LOOP_DISTANCE_MM and angle < LOOP_ANGLE_RAD:
+            scored.append((distance / LOOP_DISTANCE_MM + angle / LOOP_ANGLE_RAD, i, relative))
+    return sorted(scored, key=lambda item: item[0])[:limit]
+
+
+def refine(keyframes, edges, device):
+    """Repeatedly matches overlapping keyframes and corrects the whole path.
+
+    Each round uses the corrected path to find more overlaps with a tighter search, so
+    multi-lap scans pull together. Matches the solver can't agree with are dropped.
+    """
+    poses = [k["pose"].cpu().numpy() for k in keyframes]
+    first_gap, loops = 0.0, []
+    for number, search_mm in enumerate(REFINE_SEARCH_MM):
+        say("Refining alignment", number / len(REFINE_SEARCH_MM))
+        loops = []
+        for j in range(len(keyframes)):
+            for _, i, relative in overlapping(keyframes, poses, j, REFINE_CANDIDATES):
+                guess = torch.from_numpy(relative).to(device)
+                T = match_keyframes(keyframes[i], keyframes[j], guess, search_mm)
+                if T is not None:
+                    loops.append((i, j, T.cpu().numpy()))
+        if not loops:
+            break
+        gaps = [float(np.linalg.norm(edge_error(poses[i], poses[j], m)[3:])) for i, j, m in loops]
+        if number == 0:
+            first_gap = max(gaps)
+        graph = edges + [(i, j, m, LOOP_WEIGHT) for i, j, m in loops]
+        solved = optimize(poses, graph)
+        kept = [loop for loop in loops if outlier_free(solved, loop)]
+        poses = optimize(poses, edges + [(i, j, m, LOOP_WEIGHT) for i, j, m in kept])
+        loops = kept
+    remaining = [float(np.linalg.norm(edge_error(poses[i], poses[j], m)[3:])) for i, j, m in loops]
+    return poses, {"loops": len(loops), "largest_gap_mm": first_gap, "final_gap_mm": max(remaining, default=0.0)}
+
+
+def outlier_free(poses, loop):
+    i, j, measured = loop
+    error = edge_error(poses[i], poses[j], measured)
+    return np.linalg.norm(error[3:]) < MAX_LOOP_ERROR_MM and np.linalg.norm(error[:3]) < MAX_LOOP_ERROR_RAD
+
+
+def relocalise(keyframes, levels, device):
+    """Tries to rejoin earlier keyframes after tracking is lost."""
+    finest = DOWNSCALES[-1]
+    newest = len(keyframes) - 1
+    for index in range(newest, max(newest - RELOCALISE_KEYFRAMES, -1), -1):
+        key = keyframes[index]
+        T = torch.eye(4, dtype=torch.float64, device=device)
         for factor in DOWNSCALES:
-            T, inliers, _, _ = icp_level(
-                latest["levels"][factor], keyframes[i]["levels"][factor], T, LOOP_SEARCH_MM
-            )
+            T, inliers, _, _ = icp_level(levels[factor], key["levels"][factor], T, LOOP_SEARCH_MM)
             if inliers == 0.0:
                 break
-        T, inliers, rms, condition = icp_level(latest["levels"][finest], keyframes[i]["levels"][finest], T)
+        if inliers == 0.0:
+            continue
+        T, inliers, rms, condition = icp_level(levels[finest], key["levels"][finest], T)
         if inliers >= LOOP_INLIERS and rms <= LOOP_RMS_MM and condition >= LOOP_MIN_CONDITION:
-            loops.append((i, newest, T.cpu().numpy()))
-    return loops
+            return index, T
+    return None, None
 
 
 def align(depth_frames, count, device):
-    """Tracks every frame and closes loops. Returns poses as {frame: 4x4 array}, and stats."""
+    """Tracks every frame and corrects the path. Returns {frame: 4x4 pose} and stats."""
     tracker = Tracker(device)
-    keyframes, edges, loops, placed = [], [], [], {}
-    lost = 0
+    keyframes, edges, placed = [], [], {}
+    lost, rejoined = 0, 0
+    current = 0
     for i in range(count):
         depth = depth_frames.read(i)
         if float((~depth.isnan()).float().mean()) < 0.05:
             continue
-        T_before = tracker.T_key.clone()
         result, levels = tracker.feed(depth)
         if result.state == "first":
             keyframes.append({"pose": result.pose, "levels": levels})
@@ -127,26 +186,29 @@ def align(depth_frames, count, device):
             continue
         if result.state == "lost":
             lost += 1
+            if lost % RELOCALISE_EVERY == 0:
+                index, T = relocalise(keyframes, levels, device)
+                if index is not None:
+                    current = index
+                    tracker.rejoin(keyframes[index]["pose"], keyframes[index]["levels"], T)
+                    placed[i] = (current, T.clone())
+                    rejoined += 1
             continue
 
         if result.new_keyframe:
-            relative = torch.linalg.inv(keyframes[-1]["pose"]) @ result.pose
-            edges.append((len(keyframes) - 1, len(keyframes), relative.cpu().numpy(), 1.0))
+            relative = torch.linalg.inv(keyframes[current]["pose"]) @ result.pose
+            edges.append((current, len(keyframes), relative.cpu().numpy(), 1.0))
             keyframes.append({"pose": result.pose, "levels": levels})
-            placed[i] = (len(keyframes) - 1, torch.eye(4, dtype=torch.float64, device=device))
-            loops.extend(find_loops(keyframes, len(keyframes) - 1))
+            current = len(keyframes) - 1
+            placed[i] = (current, torch.eye(4, dtype=torch.float64, device=device))
         else:
-            placed[i] = (len(keyframes) - 1, tracker.T_key.clone())
+            placed[i] = (current, tracker.T_key.clone())
         if i % 20 == 0:
             say("Aligning frames", i / count)
 
-    tracked = [k["pose"].cpu().numpy() for k in keyframes]
-    gaps = [float(np.linalg.norm(edge_error(tracked[i], tracked[j], m)[3:])) for i, j, m in loops]
-    corrected = tracked
-    if loops:
-        corrected = optimize(tracked, edges + [(i, j, m, LOOP_WEIGHT) for i, j, m in loops])
+    corrected, stats = refine(keyframes, edges, device)
     poses = {i: corrected[key] @ T.cpu().numpy() for i, (key, T) in placed.items()}
-    return poses, {"lost": lost, "loops": len(loops), "largest_gap_mm": max(gaps, default=0.0)}
+    return poses, {"lost": lost, "rejoined": rejoined, "keyframes": len(keyframes), **stats}
 
 
 def load_edges(data):
@@ -358,6 +420,23 @@ def extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape):
     return world, normals.astype(np.float32), rgb.clamp(0, 255).byte().cpu().numpy(), faces
 
 
+def remove_small_pieces(vertices, normals, rgb, faces):
+    """Drops loose fragments, which are nearly always noise."""
+    a, b, c = faces.T
+    links = coo_matrix(
+        (np.ones(len(faces) * 2, dtype=bool), (np.concatenate((a, b)), np.concatenate((b, c)))),
+        shape=(len(vertices), len(vertices)),
+    )
+    _, labels = connected_components(links, directed=False)
+    sizes = np.bincount(labels[a])
+    keep_face = sizes[labels[a]] >= MIN_PIECE_FACES
+    faces = faces[keep_face]
+    used = np.zeros(len(vertices), dtype=bool)
+    used[faces.ravel()] = True
+    remap = np.cumsum(used) - 1
+    return vertices[used], normals[used], rgb[used], remap[faces].astype(np.int32)
+
+
 def build(folder, settings):
     started = time.time()
     device = device_for(settings)
@@ -387,6 +466,8 @@ def build(folder, settings):
         depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device
     )
     vertices, normals, rgb, faces = extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape)
+    say("Cleaning mesh", None)
+    vertices, normals, rgb, faces = remove_small_pieces(vertices, normals, rgb, faces)
     vertices, normals = camera_to_view(vertices), camera_to_view(normals)
     write_mesh(session.mesh_path, vertices, normals, rgb, faces)
     write_stl(session.stl_path, vertices, faces)

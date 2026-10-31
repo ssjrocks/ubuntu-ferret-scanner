@@ -7,6 +7,11 @@ import numpy as np
 
 ANCHOR_WEIGHT = 1e8
 EPSILON = 1e-9
+# Rotation errors move a surface by their angle times its distance, so they are weighted by
+# the square of a typical working distance in mm. Without this, the solver hides errors in
+# rotation, which bends the model.
+LEVER_MM = 400.0
+INFORMATION = np.diag([LEVER_MM**2] * 3 + [1.0] * 3)
 
 
 def hat(w):
@@ -71,14 +76,15 @@ def optimize(poses, edges, iterations=12):
             error = edge_error(poses[i], poses[j], measured)
             J_i = -adjoint(np.linalg.inv(poses[j]) @ poses[i])
             a, c = 6 * i, 6 * j
-            H[a : a + 6, a : a + 6] += weight * J_i.T @ J_i
-            H[a : a + 6, c : c + 6] += weight * J_i.T
-            H[c : c + 6, a : a + 6] += weight * J_i
-            H[c : c + 6, c : c + 6] += weight * np.eye(6)
-            b[a : a + 6] += weight * J_i.T @ error
-            b[c : c + 6] += weight * error
+            omega = weight * INFORMATION
+            H[a : a + 6, a : a + 6] += J_i.T @ omega @ J_i
+            H[a : a + 6, c : c + 6] += J_i.T @ omega
+            H[c : c + 6, a : a + 6] += omega @ J_i
+            H[c : c + 6, c : c + 6] += omega
+            b[a : a + 6] += J_i.T @ omega @ error
+            b[c : c + 6] += omega @ error
 
-        H[:6, :6] += np.eye(6) * ANCHOR_WEIGHT
+        H[:6, :6] += np.eye(6) * ANCHOR_WEIGHT * LEVER_MM**2
         step = np.linalg.solve(H, -b)
         for k in range(len(poses)):
             poses[k] = poses[k] @ exp_se3(step[6 * k : 6 * k + 6])

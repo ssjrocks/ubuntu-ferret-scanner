@@ -8,7 +8,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ubuntu_ferret_scanner import calibration, ply
-from ubuntu_ferret_scanner.reconstruct import choose_voxel
+from ubuntu_ferret_scanner.reconstruct import MIN_PIECE_FACES, choose_voxel, remove_small_pieces
 from ubuntu_ferret_scanner.settings import RESERVED_THREADS, Settings
 
 
@@ -50,6 +50,23 @@ class Files(unittest.TestCase):
     def test_view_axes_are_a_rotation(self):
         flip = np.diag([1.0, -1.0, -1.0])
         self.assertAlmostEqual(np.linalg.det(flip), 1.0)
+
+
+class Cleaning(unittest.TestCase):
+    def test_small_pieces_go_and_large_ones_stay(self):
+        count = MIN_PIECE_FACES + 5
+        strip = np.array([[k, k + 1, k + 2] for k in range(count)], dtype=np.int32)
+        loose = np.array([[0, 1, 2]], dtype=np.int32) + count + 2
+        faces = np.concatenate((strip, loose))
+        total = count + 5
+        vertices = np.zeros((total, 3), dtype=np.float32)
+        vertices[:, 0] = np.arange(total)
+        normals = np.zeros((total, 3), dtype=np.float32)
+        colours = np.zeros((total, 3), dtype=np.uint8)
+        kept_vertices, _, _, kept_faces = remove_small_pieces(vertices, normals, colours, faces)
+        self.assertEqual(len(kept_faces), count)
+        self.assertEqual(len(kept_vertices), count + 2)
+        self.assertEqual(int(kept_faces.max()), count + 1)
 
 
 class Resources(unittest.TestCase):

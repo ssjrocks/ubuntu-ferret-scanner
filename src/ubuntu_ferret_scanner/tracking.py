@@ -158,3 +158,10 @@ class Tracker:
             self.T_key = torch.eye(4, dtype=torch.float64, device=self.device)
             result.new_keyframe = True
         return result, levels
+
+    def rejoin(self, key_pose, key_levels, T):
+        """Continues tracking from a keyframe after being lost."""
+        self.key_pose = key_pose
+        self.key_levels = key_levels
+        self.T_key = T.clone()
+        self.step = torch.eye(4, dtype=torch.float64, device=self.device)

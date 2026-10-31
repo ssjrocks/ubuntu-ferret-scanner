@@ -108,3 +108,33 @@ default loop search and every 4th depth frame.
 - The colour centre is the rough value in `protocol/camera-layout.md`, so colour accuracy is
   unmeasured.
 - The tool stops if the best time shift lands at the edge of its search.
+
+## Multi-lap build fix
+
+Date: 2026-10-31. Source: a 74-second, 2,215-frame handheld desk scan from the app, about
+7.2 m of movement over several laps. Its first model had doubled, smeared surfaces.
+
+Two changes fixed most of this:
+
+- The pose graph treated rotation error as far cheaper than position error. Errors were hidden
+  in rotation, which bends surfaces. Rotation is now weighted by the square of a 400 mm working
+  distance. This fits the earlier result where more loop matches made surfaces thicker.
+- Alignment now refines over four rounds. Each round matches overlapping keyframes using the
+  corrected path, with a tighter search, and drops matches the solver can't agree with.
+
+| Measure | Before | After |
+|---|---|---|
+| Median surface spread, 6 mm columns | 17.6 mm | 6.0 mm |
+| Cloud points | 9.15 million | 3.09 million |
+| Largest gap | 30 mm, not resolved | 31.9 mm before correction, 4.9 mm after |
+| Loop matches used | 223 | 470 |
+| Build time | 116 s | 191 s |
+
+- Viewed by eye, the keyboard now shows single keys, and the desk and nearby objects are single
+  surfaces. Accuracy against a reference is not measured.
+- The 30-second scan still builds, with a 2.6 mm gap before correction and 0.5 mm after.
+- Meshes now drop loose pieces under 300 faces, and voxels need at least 6 samples.
+- Tracking can rejoin earlier keyframes after being lost, but this has only worked once.
+- Moving subjects are not supported. The method assumes the whole scene is rigid, so a person
+  shifting or breathing breaks tracking and fusion.
+- Flat desk areas still show faint ripples. Cause unknown.
