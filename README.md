@@ -79,8 +79,8 @@ bend and fail to meet itself. "No size limit" has to be proven on real scans.
 ## Updates and problem reports
 
 `ubuntu-ferret-scanner update` checks this repo's latest GitHub release, and
-`ubuntu-ferret-scanner update --install` installs a verified newer wheel. Updates need
-a public repo or a release token. While this repo is private, the check finds nothing.
+`ubuntu-ferret-scanner update --install` installs a verified newer wheel. No releases have
+been published yet, so the check finds nothing for now.
 
 Crashes and `ubuntu-ferret-scanner report "note"` send a report to the developer's own
 server (ssjrocks.com). A report holds the app version, a random install ID, PC model, OS
