@@ -76,3 +76,29 @@ of 62 fields, 32 bits each. The data layout has not been read.
 - How does the WiFi bridge carry the data?
 
 No stream has been started yet, so frames, calibration and IMU data are untested.
+
+## First stream test
+
+Date: 2026-10-31. Source: 3-second V4L2 captures at 5 Gbit/s, one stream at a time,
+with the scanner on a desk facing a ceiling. No vendor commands were sent.
+
+| Device | Stream | Mode | Measured | Result |
+|---|---|---|---|---|
+| `/dev/video4` | RGB | MJPEG 1920x1080 | 30.0 fps, 91 frames | Clear image |
+| `/dev/video4` | RGB | YUYV 1920x1080 | 30.0 fps, 90 frames | Clear image, see below |
+| `/dev/video2` | IR | Y8 1280x800 | 29.7 fps, 90 frames | Projected dot pattern visible |
+| `/dev/video0` | Depth | Y8 1280x800 | 30.0 fps, 91 frames | Every sampled frame all zero |
+
+`/dev/video1`, `3` and `5` are not capture nodes. They are probably UVC metadata
+nodes, which is unconfirmed.
+
+- The IR dot pattern shows the projector ran with standard UVC streaming alone.
+- ffmpeg flagged YUYV buffers as corrupted (about 12-48 KB reported) throughout
+  the clip, yet all 90 frames were unique and every sampled row changed between
+  neighbouring frames. The cause is unknown, so YUYV is not yet trustworthy.
+- The zero depth has no proven cause. Candidates: the ceiling is beyond the
+  listed 150-700 mm range, Y8 is not the real depth format, or vendor commands
+  are needed.
+- Y10 and Y14 could not be captured with ffmpeg: Y10 is listed as unsupported, and
+  the kernel does not list Y14 at all.
+- Streams have not been run together. Calibration, IMU and WiFi are untested.
