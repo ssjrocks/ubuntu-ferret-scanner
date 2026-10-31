@@ -1,0 +1,21 @@
+# Build output
+build/
+dist/
+__pycache__/
+*.pyc
+.venv/
+
+# Scan data
+captures/
+*.pcap
+*.pcapng
+*.ply
+*.obj
+*.stl
+
+# Vendor binaries must never enter this repo (docs/CLEAN_ROOM.md)
+*.exe
+*.dll
+*.msi
+*.bin
+*.fw
