@@ -180,3 +180,17 @@ tape's 1/16-inch ticks are 4.948 px apart at 1920x1080, so 3.117 px per mm at ab
 - Using that width, the 186 px IR width and the 41 cm tape distance gives a focal length
   of about 965-978, or 1-2% above the stored value. That is within this method's error,
   so the stored 956.8 is kept.
+
+## First point cloud
+
+Date: 2026-10-31. Source: `tools/depth_to_cloud.py`, using the median of up to 24 long-range
+Y14 frames from a tripod. The lens centre is assumed to be mid-frame, and distortion is
+ignored.
+
+- 699,200 points from 377 to 717 mm. The largest z matches the formula's far limit.
+- The box and shelf stand in front of the monitor, and the hole behind the box matches
+  the view blocked from the projector or camera.
+- A plane fitted to the box face has 0.29 mm RMS error, and the monitor has 0.98 mm.
+- The box measures 81.7-82.8 mm wide in the cloud, against 78-79 mm by tape. That is
+  about 4-5% wide, likely including depth edge spreading. The cause is unproven.
+- This is one viewpoint with no colour. Combining frames is not started.
