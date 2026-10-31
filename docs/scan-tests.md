@@ -138,3 +138,33 @@ Two changes fixed most of this:
 - Moving subjects are not supported. The method assumes the whole scene is rigid, so a person
   shifting or breathing breaks tracking and fusion.
 - Flat desk areas still show faint ripples. Cause unknown.
+
+## Sparse fusion and cleaner colour
+
+Date: 2026-10-31. Source: the 74-second and 30-second desk scans.
+
+Single depth frames had 0.1-0.4 mm noise on the flattest patches, measured at 27-41 cm. A dense
+volume over the desk was about 5% occupied, and that waste forced a 1.42 mm voxel. Changes:
+
+- Fusion stores 16-voxel bricks near surfaces only, and meshes in chunks that are welded back
+  together. The finest voxel that fits the memory limit is chosen automatically.
+- Depth pixels beside jumps and holes are dropped from the cloud and fusion.
+- Surfaces seen at a shallow angle count for less in fusion.
+- Colour only comes from samples close to the surface. It is weighted by how squarely the
+  surface faces the camera and by frame sharpness, with each frame's brightness matched.
+
+| 74-second scan | Before | After |
+|---|---|---|
+| Voxel size | 1.42 mm | 0.79 mm |
+| Triangles | 4.26 million | 8.59 million |
+| Peak GPU memory | 12.4 GB | 9.06 GB |
+| Build time | 191 s | 209 s |
+
+The 30-second scan reached 0.63 mm and 9.58 million triangles in 71 s, with 9.32 GB peak.
+
+- Viewed by eye, speckle is much reduced, and key shapes and the pen, radio and controller are
+  crisp in the bare model.
+- Faint ripples remain on the flat desk. Their cause is still unknown.
+- Fine colour detail, such as key lettering, remains soft.
+- Colour still carries room lighting, including the green RGB glow.
+- Accuracy against a reference is not measured.

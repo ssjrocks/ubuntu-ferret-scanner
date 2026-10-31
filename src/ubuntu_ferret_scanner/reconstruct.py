@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageFilter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -61,13 +62,21 @@ SYNC_FRAMES = 24
 SYNC_RANGE_MS = 600
 SYNC_STEP_MS = 33
 
-BYTES_PER_VOXEL = 20
+BYTES_PER_VOXEL = 24
 VOLUME_SHARE = 0.6  # the rest is working memory for each frame
-MIN_VOXEL_MM = 0.75
-TRUNCATION_VOXELS = 4
+MIN_VOXEL_MM = 0.5
+BRICK_VOXELS = 16
+CHUNK_BRICKS = 16
+TRUNCATION_MM = 3.0
+MIN_TRUNCATION_VOXELS = 3
 MIN_WEIGHT = 6.0
 MIN_PIECE_FACES = 300
-BOUNDS_MARGIN_MM = 15.0
+EDGE_WINDOW = 5
+EDGE_LIMIT_MM = 6.0
+COLOUR_BAND_VOXELS = 1.5
+MIN_FACING = 0.25
+GAIN_LIMITS = (0.6, 1.6)
+GAIN_SAMPLES = 20000
 
 
 def say(stage, progress=None, **extra):
@@ -85,6 +94,19 @@ class DepthFrames:
         data = self.file.read(DEPTH_BYTES)
         raw = torch.frombuffer(bytearray(data), dtype=torch.uint8).to(self.device)
         return to_depth_mm(decode_y14(raw), self.offset)
+
+    def read_clean(self, index):
+        return remove_edges(self.read(index))
+
+
+def remove_edges(depth):
+    """Drops pixels beside depth jumps and holes, where stereo matching is unreliable."""
+    near = depth.nan_to_num(nan=0.0)[None, None]
+    far = depth.nan_to_num(nan=1e5)[None, None]
+    padding = EDGE_WINDOW // 2
+    highest = F.max_pool2d(near, EDGE_WINDOW, 1, padding)
+    lowest = -F.max_pool2d(-far, EDGE_WINDOW, 1, padding)
+    return torch.where((highest - lowest)[0, 0] > EDGE_LIMIT_MM, float("nan"), depth)
 
 
 def match_keyframes(a, b, guess, search_mm):
@@ -338,7 +360,7 @@ def build_cloud(depth_frames, colour, depth_ms, poses, shift, stride, device):
     merger = VoxelMerger(device)
     chosen = sorted(poses)[:: stride]
     for number, i in enumerate(chosen):
-        camera = camera_points(depth_frames.read(i), CLOUD_PIXEL_STEP)
+        camera = camera_points(depth_frames.read_clean(i), CLOUD_PIXEL_STEP)
         picture = decode_colour(colour, colour.nearest(depth_ms[i] - shift), device)
         if picture is None:
             continue
@@ -353,71 +375,217 @@ def build_cloud(depth_frames, colour, depth_ms, poses, shift, stride, device):
     return points, colours
 
 
-def choose_voxel(extent, settings):
+def surface_bricks(points, voxel, device):
+    """Which fixed-size bricks of voxels lie near the surface, as integer coordinates."""
+    size = voxel * BRICK_VOXELS
+    cells = torch.unique((torch.from_numpy(points).to(device) / size).floor().long(), dim=0)
+    steps = torch.tensor([-1, 0, 1], device=device)
+    around = torch.cartesian_prod(steps, steps, steps)
+    return torch.unique((cells[:, None, :] + around[None]).reshape(-1, 3), dim=0)
+
+
+def choose_voxel(points, settings, device):
+    """The finest voxel size whose surface bricks fit the memory limit."""
     limit = settings.vram_limit_gb if settings.use_gpu else settings.ram_limit_gb
     budget = limit * 1024**3 * VOLUME_SHARE
-    volume = float(np.prod(extent))
-    fitted = (volume * BYTES_PER_VOXEL / budget) ** (1 / 3)
-    wanted = settings.voxel_mm if settings.voxel_mm > 0 else MIN_VOXEL_MM
-    return max(fitted, wanted, MIN_VOXEL_MM)
+    voxel = settings.voxel_mm if settings.voxel_mm > 0 else MIN_VOXEL_MM
+    voxel = max(voxel, MIN_VOXEL_MM)
+    sample = points[:: max(len(points) // 2_000_000, 1)]
+    while True:
+        bricks = surface_bricks(sample, voxel, device)
+        needed = bricks.shape[0] * BRICK_VOXELS**3 * BYTES_PER_VOXEL
+        if needed <= budget:
+            return voxel
+        if settings.voxel_mm > 0:
+            raise RuntimeError(
+                f"{voxel} mm detail needs {needed / 1024**3:.1f} GB. Raise the memory limit or use auto detail."
+            )
+        voxel *= 1.12
+
+
+class SparseVolume:
+    """A signed distance field stored only in bricks near surfaces."""
+
+    def __init__(self, points, voxel, device):
+        self.voxel = voxel
+        self.device = device
+        bricks = surface_bricks(points, voxel, device)
+        self.origin = bricks.min(dim=0).values
+        self.dims = bricks.max(dim=0).values - self.origin + 1
+        self.bricks = bricks
+        self.table = torch.full((int(self.dims.prod()),), -1, dtype=torch.int32, device=device)
+        self.table[self.brick_index(bricks)] = torch.arange(bricks.shape[0], dtype=torch.int32, device=device)
+        count = bricks.shape[0] * BRICK_VOXELS**3
+        self.sdf = torch.zeros(count, device=device)
+        self.weight = torch.zeros(count, device=device)
+        self.colour = torch.zeros(count, 3, device=device)
+        self.colour_weight = torch.zeros(count, device=device)
+
+    def brick_index(self, bricks):
+        b = bricks - self.origin
+        return (b[:, 0] * self.dims[1] + b[:, 1]) * self.dims[2] + b[:, 2]
+
+    def locate(self, cells):
+        """Storage index for voxel coordinates, or -1 for voxels with no brick."""
+        bricks = torch.div(cells, BRICK_VOXELS, rounding_mode="floor")
+        inside = ((bricks >= self.origin) & (bricks < self.origin + self.dims)).all(dim=1)
+        slots = torch.full((cells.shape[0],), -1, dtype=torch.int64, device=self.device)
+        slots[inside] = self.table[self.brick_index(bricks[inside])].long()
+        local = cells - bricks * BRICK_VOXELS
+        offset = (local[:, 0] * BRICK_VOXELS + local[:, 1]) * BRICK_VOXELS + local[:, 2]
+        return torch.where(slots >= 0, slots * BRICK_VOXELS**3 + offset, torch.tensor(-1, device=self.device))
+
+
+def image_normals(depth):
+    """Camera-facing amount of each pixel's surface, from 0 (edge on) to 1 (facing)."""
+    z = depth.nan_to_num(nan=0.0)
+    dx = (z[1:-1, 2:] - z[1:-1, :-2]) * FOCAL / (2 * z[1:-1, 1:-1].clamp(min=1.0))
+    dy = (z[2:, 1:-1] - z[:-2, 1:-1]) * FOCAL / (2 * z[1:-1, 1:-1].clamp(min=1.0))
+    facing = torch.zeros_like(z)
+    facing[1:-1, 1:-1] = 1 / torch.sqrt(1 + dx**2 + dy**2)
+    return facing
+
+
+def sharpness(picture):
+    """Variance of a fast Laplacian: blurred frames score low."""
+    gray = picture.float().mean(dim=2)[::2, ::2]
+    laplacian = gray[1:-1, 1:-1] * 4 - gray[:-2, 1:-1] - gray[2:, 1:-1] - gray[1:-1, :-2] - gray[1:-1, 2:]
+    return float(laplacian.var())
 
 
 def fuse(depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device):
-    low = torch.tensor(np.percentile(cloud, 0.1, axis=0) - BOUNDS_MARGIN_MM, device=device).float()
-    high = torch.tensor(np.percentile(cloud, 99.9, axis=0) + BOUNDS_MARGIN_MM, device=device).float()
-    voxel = choose_voxel((high - low).cpu().numpy(), settings)
-    dims = ((high - low) / voxel).ceil().long()
-    nx, ny, nz = dims.tolist()
-    count = nx * ny * nz
-    say("Fusing surfaces", 0.0, voxel_mm=round(voxel, 2), voxels=count)
+    voxel = choose_voxel(cloud, settings, device)
+    volume = SparseVolume(cloud[:: max(len(cloud) // 5_000_000, 1)], voxel, device)
+    say("Fusing surfaces", 0.0, voxel_mm=round(voxel, 2), bricks=volume.bricks.shape[0])
 
-    sdf_sum = torch.zeros(count, device=device, dtype=torch.float32)
-    weight = torch.zeros(count, device=device, dtype=torch.float32)
-    colour_sum = torch.zeros(count, 3, device=device, dtype=torch.float32)
-
-    truncation = voxel * TRUNCATION_VOXELS
-    offsets = torch.arange(-TRUNCATION_VOXELS, TRUNCATION_VOXELS + 1, device=device).float() * voxel
+    truncation = max(TRUNCATION_MM, voxel * MIN_TRUNCATION_VOXELS)
+    steps = int(np.ceil(truncation / voxel))
+    offsets = torch.arange(-steps, steps + 1, device=device).float() * voxel
+    near_surface = offsets.abs() <= voxel * COLOUR_BAND_VOXELS
     chosen = sorted(poses)[:: stride]
+
+    scores = []
     for number, i in enumerate(chosen):
-        camera = camera_points(depth_frames.read(i), 1)
+        depth = depth_frames.read_clean(i)
         picture = decode_colour(colour, colour.nearest(depth_ms[i] - shift), device)
         if picture is None:
             continue
+        score = sharpness(picture)
+        scores.append(score)
+        focus = min((score / float(np.median(scores[-200:]))) ** 2, 1.0)
+
+        rows, cols = (~depth.isnan()).nonzero(as_tuple=True)
+        z = depth[rows, cols]
+        camera = torch.stack(((cols - CENTRE_X) * z / FOCAL, (rows - CENTRE_Y) * z / FOCAL, z), dim=1)
         rgb, seen = frame_colours(camera, picture)
+        facing = image_normals(depth)[rows[seen], cols[seen]]
         camera = camera[seen]
         pose = torch.from_numpy(poses[i]).to(device).float()
+
         scale = 1 + offsets[None, :] / camera[:, 2:3]  # steps along each pixel's ray
-        samples = camera[:, None, :] * scale[:, :, None]
-        world = samples.reshape(-1, 3) @ pose[:3, :3].T + pose[:3, 3]
-        cell = ((world - low) / voxel).floor().long()
-        inside = ((cell >= 0) & (cell < dims)).all(dim=1)
-        index = (cell[:, 0] * ny + cell[:, 1]) * nz + cell[:, 2]
-        index = index[inside]
-        distance = (-offsets / truncation).repeat(camera.shape[0])[inside]
-        sdf_sum.index_add_(0, index, distance)
-        weight.index_add_(0, index, torch.ones_like(distance))
-        colour_sum.index_add_(0, index, rgb.repeat_interleave(offsets.numel(), dim=0)[inside])
+        world = (camera[:, None, :] * scale[:, :, None]).reshape(-1, 3) @ pose[:3, :3].T + pose[:3, 3]
+        index = volume.locate((world / voxel).floor().long())
+        distance = (-offsets / truncation).repeat(camera.shape[0])
+        strength = facing.repeat_interleave(offsets.numel())
+        keep = index >= 0
+        volume.sdf.index_add_(0, index[keep], distance[keep] * strength[keep])
+        volume.weight.index_add_(0, index[keep], strength[keep])
+
+        band = near_surface.repeat(camera.shape[0]) & keep & (strength > MIN_FACING)
+        band_index = index[band]
+        band_rgb = rgb.repeat_interleave(offsets.numel(), dim=0)[band]
+        band_weight = (strength[band] ** 2 * focus).clamp(min=1e-3)
+        known = volume.colour_weight[band_index] > 0
+        if int(known.sum()) > 1000:
+            sample = known.nonzero().squeeze(1)[:: max(int(known.sum()) // GAIN_SAMPLES, 1)]
+            stored = volume.colour[band_index[sample]] / volume.colour_weight[band_index[sample]][:, None]
+            gain = (stored.sum(dim=1) / band_rgb[sample].sum(dim=1).clamp(min=1.0)).median().clamp(*GAIN_LIMITS)
+            band_rgb = (band_rgb * gain).clamp(max=255.0)
+        volume.colour.index_add_(0, band_index, band_rgb * band_weight[:, None])
+        volume.colour_weight.index_add_(0, band_index, band_weight)
         if number % 10 == 0:
             say("Fusing surfaces", number / len(chosen))
+    return volume
 
-    return sdf_sum, weight, colour_sum, low, voxel, (nx, ny, nz)
 
-
-def extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape):
-    say("Extracting mesh", None)
+def extract_chunk(volume, chunk):
+    """Runs marching cubes on one block of bricks. Returns voxel-space vertices, faces, colour."""
+    size = CHUNK_BRICKS * BRICK_VOXELS + 1
+    axis = torch.arange(size, device=volume.device)
+    grid = torch.cartesian_prod(axis, axis, axis) + chunk * CHUNK_BRICKS * BRICK_VOXELS
+    index = volume.locate(grid)
+    found = index >= 0
+    weight = torch.zeros(grid.shape[0], device=volume.device)
+    field = torch.ones(grid.shape[0], device=volume.device)
+    weight[found] = volume.weight[index[found]]
     measured = weight >= MIN_WEIGHT
-    field = torch.where(measured, sdf_sum / weight.clamp(min=1), torch.ones_like(sdf_sum))
+    field[measured] = volume.sdf[index[measured]] / weight[measured]
+    if not bool(measured.any()):
+        return None
+    shape = (size, size, size)
     field_cpu = field.reshape(shape).cpu().numpy()
+    if field_cpu.min() >= 0 or field_cpu.max() <= 0:
+        return None
     mask = measured.reshape(shape).cpu().numpy()
-    vertices, faces, normals, _ = measure.marching_cubes(field_cpu, 0.0, mask=mask, allow_degenerate=False)
-    faces = faces.astype(np.int32)
+    try:
+        vertices, faces, _, _ = measure.marching_cubes(field_cpu, 0.0, mask=mask, allow_degenerate=False)
+    except (ValueError, RuntimeError):
+        return None
+    if len(faces) == 0:
+        return None
 
-    cells = np.round(vertices).astype(np.int64)
-    cells = np.minimum(cells, np.array(shape) - 1)
-    index = torch.from_numpy((cells[:, 0] * shape[1] + cells[:, 1]) * shape[2] + cells[:, 2]).to(sdf_sum.device)
-    rgb = colour_sum[index] / weight[index].clamp(min=1)[:, None]
-    world = vertices.astype(np.float32) * voxel + low.cpu().numpy()
-    return world, normals.astype(np.float32), rgb.clamp(0, 255).byte().cpu().numpy(), faces
+    cells = torch.from_numpy(np.round(vertices).astype(np.int64)).to(volume.device)
+    colour_index = index[(cells[:, 0] * size + cells[:, 1]) * size + cells[:, 2]]
+    rgb = torch.full((cells.shape[0], 3), 128.0, device=volume.device)
+    good = (colour_index >= 0)
+    good_index = colour_index[good]
+    weights = volume.colour_weight[good_index].clamp(min=1e-6)[:, None]
+    rgb[good] = volume.colour[good_index] / weights
+    origin = (chunk * CHUNK_BRICKS * BRICK_VOXELS).cpu().numpy()
+    return vertices.astype(np.float64) + origin, faces, rgb.clamp(0, 255).byte().cpu().numpy()
+
+
+def weld(vertices, colours, faces):
+    """Joins vertices that match along chunk seams."""
+    keys = np.round(vertices * 64).astype(np.int64)
+    keys -= keys.min(axis=0)
+    span = keys.max(axis=0) + 1
+    packed = (keys[:, 0] * span[1] + keys[:, 1]) * span[2] + keys[:, 2]
+    _, first, inverse = np.unique(packed, return_index=True, return_inverse=True)
+    faces = inverse[faces].astype(np.int32)
+    good = (faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])
+    return vertices[first], colours[first], faces[good]
+
+
+def vertex_normals(vertices, faces):
+    corners = vertices[faces]
+    face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    normals = np.zeros_like(vertices)
+    for k in range(3):
+        for axis in range(3):
+            normals[:, axis] += np.bincount(faces[:, k], weights=face_normals[:, axis], minlength=len(vertices))
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    return normals / np.maximum(length, 1e-12)
+
+
+def extract_mesh(volume):
+    chunks = torch.unique(torch.div(volume.bricks, CHUNK_BRICKS, rounding_mode="floor"), dim=0)
+    parts_v, parts_f, parts_c = [], [], []
+    start = 0
+    for number, chunk in enumerate(chunks):
+        result = extract_chunk(volume, chunk)
+        if result is not None:
+            vertices, faces, colours = result
+            parts_v.append(vertices)
+            parts_c.append(colours)
+            parts_f.append(faces + start)
+            start += len(vertices)
+        if number % 5 == 0:
+            say("Extracting mesh", number / chunks.shape[0])
+    vertices, colours, faces = weld(np.concatenate(parts_v), np.concatenate(parts_c), np.concatenate(parts_f))
+    world = (vertices * volume.voxel).astype(np.float32)
+    # Marching cubes winds these faces so that normals point away from the scanner's side.
+    return world, (-vertex_normals(vertices, faces)).astype(np.float32), colours, faces
 
 
 def remove_small_pieces(vertices, normals, rgb, faces):
@@ -462,10 +630,9 @@ def build(folder, settings):
     write_cloud(session.cloud_path, camera_to_view(cloud), cloud_rgb)
     say("Point cloud ready", 1.0, cloud=str(session.cloud_path), points=len(cloud))
 
-    sdf_sum, weight, colour_sum, low, voxel, shape = fuse(
-        depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device
-    )
-    vertices, normals, rgb, faces = extract_mesh(sdf_sum, weight, colour_sum, low, voxel, shape)
+    volume = fuse(depth_frames, colour, depth_ms, poses, shift, stride, cloud, settings, device)
+    voxel = volume.voxel
+    vertices, normals, rgb, faces = extract_mesh(volume)
     say("Cleaning mesh", None)
     vertices, normals, rgb, faces = remove_small_pieces(vertices, normals, rgb, faces)
     vertices, normals = camera_to_view(vertices), camera_to_view(normals)

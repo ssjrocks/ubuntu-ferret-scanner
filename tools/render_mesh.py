@@ -13,7 +13,7 @@ from ubuntu_ferret_scanner import ply
 SIZE = 1400
 
 
-def render(vertices, normals, yaw, pitch):
+def render(vertices, normals, colours, yaw, pitch):
     centre = np.median(vertices, axis=0)
     cy, sy, cp, sp = np.cos(yaw), np.sin(yaw), np.cos(pitch), np.sin(pitch)
     Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
@@ -29,8 +29,12 @@ def render(vertices, normals, yaw, pitch):
     keep = (u >= 0) & (u < SIZE - 1) & (v >= 0) & (v < SIZE - 1)
     light = np.abs(n @ (np.array([0.3, 0.5, 0.8]) / 1.03))
     order = np.argsort(p[keep, 2])
-    picture = np.zeros((SIZE, SIZE), dtype=np.uint8)
-    value = (40 + 215 * light[keep][order]).astype(np.uint8)
+    if colours is None:
+        picture = np.zeros((SIZE, SIZE), dtype=np.uint8)
+        value = (40 + 215 * light[keep][order]).astype(np.uint8)
+    else:
+        picture = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
+        value = colours[keep][order]
     for du, dv in ((0, 0), (1, 0), (0, 1), (1, 1)):
         picture[v[keep][order] + dv, u[keep][order] + du] = value
     return picture
@@ -42,9 +46,11 @@ def main():
     parser.add_argument("out")
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--pitch", type=float, default=0.0)
+    parser.add_argument("--colour", action="store_true")
     args = parser.parse_args()
-    vertices, normals, _, _ = ply.read_mesh(args.mesh)
-    Image.fromarray(render(vertices, normals, args.yaw, args.pitch)).save(args.out)
+    vertices, normals, colours, _ = ply.read_mesh(args.mesh)
+    picture = render(vertices, normals, colours if args.colour else None, args.yaw, args.pitch)
+    Image.fromarray(picture).save(args.out)
 
 
 if __name__ == "__main__":

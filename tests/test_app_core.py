@@ -8,7 +8,14 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ubuntu_ferret_scanner import calibration, ply
-from ubuntu_ferret_scanner.reconstruct import MIN_PIECE_FACES, choose_voxel, remove_small_pieces
+from ubuntu_ferret_scanner.reconstruct import (
+    BRICK_VOXELS,
+    MIN_PIECE_FACES,
+    SparseVolume,
+    choose_voxel,
+    extract_mesh,
+    remove_small_pieces,
+)
 from ubuntu_ferret_scanner.settings import RESERVED_THREADS, Settings
 
 
@@ -76,15 +83,49 @@ class Resources(unittest.TestCase):
         self.assertGreaterEqual(settings.cpu_threads, 1)
         self.assertLessEqual(settings.cpu_threads, max(__import__("os").cpu_count() - RESERVED_THREADS, 1))
 
-    def test_voxel_grows_for_large_scans(self):
-        settings = Settings(use_gpu=True, vram_limit_gb=8.0)
-        small = choose_voxel((500.0, 500.0, 500.0), settings)
-        large = choose_voxel((5000.0, 5000.0, 2000.0), settings)
-        self.assertGreater(large, small)
+    def test_voxel_grows_when_memory_is_small(self):
+        surface = np.random.default_rng(0).uniform(0, 900, (200000, 3)).astype(np.float32)
+        surface[:, 2] = 0
+        device = torch.device("cpu")
+        roomy = choose_voxel(surface, Settings(use_gpu=True, vram_limit_gb=8.0), device)
+        tight = choose_voxel(surface, Settings(use_gpu=True, vram_limit_gb=0.5), device)
+        self.assertGreater(tight, roomy)
 
-    def test_voxel_respects_a_chosen_size(self):
-        settings = Settings(use_gpu=True, vram_limit_gb=8.0, voxel_mm=3.0)
-        self.assertEqual(choose_voxel((500.0, 500.0, 500.0), settings), 3.0)
+    def test_chosen_detail_is_kept_or_refused(self):
+        surface = np.random.default_rng(0).uniform(0, 900, (200000, 3)).astype(np.float32)
+        surface[:, 2] = 0
+        device = torch.device("cpu")
+        chosen = Settings(use_gpu=True, vram_limit_gb=8.0, voxel_mm=3.0)
+        self.assertEqual(choose_voxel(surface, chosen, device), 3.0)
+        with self.assertRaises(RuntimeError):
+            choose_voxel(surface, Settings(use_gpu=True, vram_limit_gb=0.1, voxel_mm=0.5), device)
+
+
+class Volume(unittest.TestCase):
+    def test_voxels_map_to_storage_and_missing_ones_do_not(self):
+        points = np.array([[10.0, 10.0, 10.0], [300.0, 10.0, 10.0]], dtype=np.float32)
+        volume = SparseVolume(points, 1.0, torch.device("cpu"))
+        cells = torch.tensor([[10, 10, 10], [11, 10, 10], [150, 10, 10]])
+        index = volume.locate(cells)
+        self.assertGreaterEqual(int(index[0]), 0)
+        self.assertEqual(int(index[1]), int(index[0]) + BRICK_VOXELS**2)
+        self.assertEqual(int(index[2]), -1)
+
+    def test_mesh_extraction_finds_a_flat_surface(self):
+        volume = SparseVolume(np.array([[40.0, 40.0, 40.0]], dtype=np.float32), 1.0, torch.device("cpu"))
+        grid = torch.cartesian_prod(*(torch.arange(BRICK_VOXELS) + 2 * BRICK_VOXELS,) * 3)
+        grid = grid[(grid >= 2 * BRICK_VOXELS).all(1)]
+        index = volume.locate(grid)
+        keep = index >= 0
+        distance = ((40 - grid[keep, 2]).float() / 4).clamp(-1, 1)
+        volume.sdf[index[keep]] = distance * 10
+        volume.weight[index[keep]] = 10
+        volume.colour[index[keep]] = 200.0
+        volume.colour_weight[index[keep]] = 1.0
+        vertices, normals, colours, faces = extract_mesh(volume)
+        self.assertGreater(len(faces), 100)
+        self.assertAlmostEqual(float(np.median(vertices[:, 2])), 40.0, delta=0.6)
+        self.assertEqual(int(np.median(colours)), 200)
 
 
 if __name__ == "__main__":
