@@ -2,8 +2,8 @@
 """Aligns a moving Y14 capture into one point cloud.
 
 Uses point-to-plane ICP (Chen and Medioni) with projective matching (Newcombe et al.,
-KinectFusion) against a keyframe. There is no loop closure yet, so drift is not corrected.
-The lens centre is assumed to be mid-frame, and distortion is ignored.
+KinectFusion) against a keyframe, then pose graph loop closure when the path revisits
+earlier keyframes. The lens centre is assumed to be mid-frame, and distortion is ignored.
 """
 import argparse
 import csv
@@ -11,6 +11,7 @@ import json
 
 import numpy as np
 
+from pose_graph import edge_error, optimize
 from depth_to_cloud import BASELINE, FOCAL, FRAME_BYTES, HEIGHT, MODE_OFFSETS, UNIT, WIDTH, render, write_ply
 
 DOWNSCALES = (8, 4)
@@ -21,6 +22,15 @@ KEYFRAME_MM = 25.0
 KEYFRAME_RAD = 0.09
 LOST_INLIERS = 0.25
 VOXEL_MM = 1.5
+LOOP_GAP_KEYFRAMES = 15
+LOOP_DISTANCE_MM = 150.0
+LOOP_ANGLE_RAD = 0.5
+LOOP_CANDIDATES = 3
+LOOP_SEARCH_MM = 40.0
+LOOP_INLIERS = 0.45
+LOOP_RMS_MM = 1.5
+LOOP_MIN_CONDITION = 0.02
+LOOP_WEIGHT = 10.0
 MAX_POINT_FRAMES = 200
 
 
@@ -89,10 +99,11 @@ def small_transform(delta):
     return T
 
 
-def icp_level(current, key, T):
+def icp_level(current, key, T, match_mm=MATCH_MM):
     points = current.vertices[current.valid]
     normals_c = current.normals[current.valid]
     inliers, rms = 0.0, np.inf
+    condition = 0.0
     for _ in range(ITERATIONS):
         p = points @ T[:3, :3].T + T[:3, 3]
         n_c = normals_c @ T[:3, :3].T
@@ -102,16 +113,16 @@ def icp_level(current, key, T):
         index = np.nonzero(inside)[0]
         index = index[key.valid[v[index], u[index]]]
         if len(index) < 200:
-            return T, 0.0, np.inf
+            return T, 0.0, np.inf, 0.0
 
         q = key.vertices[v[index], u[index]]
         n = key.normals[v[index], u[index]]
         pi = p[index]
-        close = np.linalg.norm(pi - q, axis=1) < MATCH_MM
+        close = np.linalg.norm(pi - q, axis=1) < match_mm
         aligned = (n * n_c[index]).sum(axis=1) > MIN_NORMAL_COS
         keep = close & aligned
         if keep.sum() < 200:
-            return T, 0.0, np.inf
+            return T, 0.0, np.inf, 0.0
 
         pi, q, n = pi[keep], q[keep], n[keep]
         residual = ((pi - q) * n).sum(axis=1)
@@ -124,9 +135,12 @@ def icp_level(current, key, T):
         T = small_transform(delta) @ T
         inliers = keep.sum() / max(len(points), 1)
         rms = float(np.sqrt(np.mean(residual**2)))
+        # A flat scene can slide freely, so weak translation directions make a match unsafe.
+        strength = np.linalg.eigvalsh(A[3:, 3:])
+        condition = float(strength[0] / strength[-1])
         if np.abs(delta[:3]).max() < 1e-5 and np.abs(delta[3:]).max() < 1e-3:
             break
-    return T, inliers, rms
+    return T, inliers, rms, condition
 
 
 def voxel_merge(sums, counts, points):
@@ -146,6 +160,37 @@ def voxel_merge(sums, counts, points):
             counts[key] = n
 
 
+def relative_angle(T):
+    return np.arccos(np.clip((np.trace(T[:3, :3]) - 1) / 2, -1, 1))
+
+
+def find_loops(keyframes, newest):
+    """Matches the newest keyframe against earlier ones close to it on the current path."""
+    latest = keyframes[newest]
+    scored = []
+    for i in range(newest - LOOP_GAP_KEYFRAMES):
+        relative = np.linalg.inv(keyframes[i]["pose"]) @ latest["pose"]
+        distance = np.linalg.norm(relative[:3, 3])
+        if distance < LOOP_DISTANCE_MM and relative_angle(relative) < LOOP_ANGLE_RAD:
+            scored.append((distance, i, relative))
+
+    loops = []
+    for _, i, relative in sorted(scored, key=lambda item: item[0])[:LOOP_CANDIDATES]:
+        T = relative
+        for factor in DOWNSCALES:
+            T, inliers, rms, condition = icp_level(
+                latest["levels"][factor], keyframes[i]["levels"][factor], T, LOOP_SEARCH_MM
+            )
+            if inliers == 0.0:
+                break
+        T, inliers, rms, condition = icp_level(
+            latest["levels"][DOWNSCALES[-1]], keyframes[i]["levels"][DOWNSCALES[-1]], T
+        )
+        if inliers >= LOOP_INLIERS and rms <= LOOP_RMS_MM and condition >= LOOP_MIN_CONDITION:
+            loops.append((i, newest, T))
+    return loops
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("prefix")
@@ -158,13 +203,11 @@ def main():
     raw = np.memmap(args.prefix + ".raw", dtype=np.uint8, mode="r")
     frames = len(raw) // FRAME_BYTES
 
-    poses, keyframe_pose, key_levels = [], np.eye(4), None
+    keyframes, edges, loops = [], [], []
+    frame_poses = {}  # frame: (keyframe index, transform from frame to keyframe)
     T_key = np.eye(4)
     previous_step = np.eye(4)
     log, lost = [], 0
-    sums, counts = {}, {}
-    used = 0
-    stride = max(frames // MAX_POINT_FRAMES, 1)
     for i in range(frames):
         values = decode_y14_fast(np.asarray(raw[i * FRAME_BYTES : (i + 1) * FRAME_BYTES]))
         depth = to_depth_mm(values, offset)
@@ -174,61 +217,79 @@ def main():
             continue
 
         levels = {f: Level(downscale(depth, f), f) for f in DOWNSCALES}
-        if key_levels is None:
-            key_levels = levels
-            T_key, pose = np.eye(4), np.eye(4)
-            poses.append((i, pose))
+        if not keyframes:
+            keyframes.append({"frame": i, "pose": np.eye(4), "levels": levels})
+            frame_poses[i] = (0, np.eye(4))
             log.append({"frame": i, "fill": fill, "state": "first"})
-        else:
-            guess = previous_step @ T_key
-            T, inliers, rms = guess, 0.0, np.inf
-            for f in DOWNSCALES:
-                T, inliers, rms = icp_level(levels[f], key_levels[f], T)
-                if inliers == 0.0:
-                    break
-            if inliers < LOST_INLIERS:
-                lost += 1
-                log.append({"frame": i, "fill": fill, "state": "lost", "inliers": inliers})
-                previous_step = np.eye(4)
-                continue
+            continue
 
-            previous_step = T @ np.linalg.inv(T_key)
-            T_key = T
-            pose = keyframe_pose @ T_key
-            poses.append((i, pose))
-            log.append({"frame": i, "fill": fill, "state": "ok", "inliers": float(inliers),
-                        "rms": rms, "pose_t": pose[:3, 3].round(2).tolist()})
+        guess = previous_step @ T_key
+        T, inliers, rms = guess, 0.0, np.inf
+        for f in DOWNSCALES:
+            T, inliers, rms, _ = icp_level(levels[f], keyframes[-1]["levels"][f], T)
+            if inliers == 0.0:
+                break
+        if inliers < LOST_INLIERS:
+            lost += 1
+            log.append({"frame": i, "fill": fill, "state": "lost", "inliers": inliers})
+            previous_step = np.eye(4)
+            continue
 
-            angle = np.arccos(np.clip((np.trace(T_key[:3, :3]) - 1) / 2, -1, 1))
-            if np.linalg.norm(T_key[:3, 3]) > KEYFRAME_MM or angle > KEYFRAME_RAD:
-                keyframe_pose, key_levels, T_key = pose, levels, np.eye(4)
+        previous_step = T @ np.linalg.inv(T_key)
+        T_key = T
+        frame_poses[i] = (len(keyframes) - 1, T_key.copy())
+        log.append({"frame": i, "fill": fill, "state": "ok", "inliers": float(inliers), "rms": rms})
 
-        if i % stride == 0:
-            rows, cols = np.nonzero(~np.isnan(depth))
-            rows, cols = rows[::2], cols[::2]
-            z = depth[rows, cols]
-            p = np.column_stack(((cols - WIDTH / 2) * z / FOCAL, (rows - HEIGHT / 2) * z / FOCAL, z))
-            voxel_merge(sums, counts, p @ pose[:3, :3].T + pose[:3, 3])
-            used += 1
+        if np.linalg.norm(T_key[:3, 3]) > KEYFRAME_MM or relative_angle(T_key) > KEYFRAME_RAD:
+            pose = keyframes[-1]["pose"] @ T_key
+            edges.append((len(keyframes) - 1, len(keyframes), T_key.copy(), 1.0))
+            keyframes.append({"frame": i, "pose": pose, "levels": levels})
+            frame_poses[i] = (len(keyframes) - 1, np.eye(4))
+            T_key = np.eye(4)
+            loops.extend(find_loops(keyframes, len(keyframes) - 1))
         if i % 100 == 0:
-            print(f"frame {i}/{frames}, poses {len(poses)}, lost {lost}, voxels {len(sums)}", flush=True)
+            print(f"frame {i}/{frames}, keyframes {len(keyframes)}, loops {len(loops)}, lost {lost}",
+                  flush=True)
+
+    tracked = [k["pose"] for k in keyframes]
+    gaps = []
+    for i, j, measured in loops:
+        error = edge_error(tracked[i], tracked[j], measured)
+        gaps.append((i, j, float(np.linalg.norm(error[3:])), float(np.degrees(np.linalg.norm(error[:3])))))
+    corrected = tracked
+    if loops:
+        corrected = optimize(tracked, edges + [(i, j, m, LOOP_WEIGHT) for i, j, m in loops])
 
     with open(args.out + "-log.json", "w") as f:
-        json.dump(log, f)
+        json.dump({"frames": log, "loops": gaps}, f)
     with open(args.out + "-poses.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        for frame, pose in poses:
-            writer.writerow([frame, *pose.ravel().tolist()])
+        for frame, (key, T) in sorted(frame_poses.items()):
+            writer.writerow([frame, *(corrected[key] @ T).ravel().tolist()])
 
-    if not sums:
-        raise SystemExit("no frames could be aligned")
+    sums, counts = {}, {}
+    chosen = sorted(frame_poses)[:: max(len(frame_poses) // MAX_POINT_FRAMES, 1)]
+    for i in chosen:
+        key, T = frame_poses[i]
+        pose = corrected[key] @ T
+        values = decode_y14_fast(np.asarray(raw[i * FRAME_BYTES : (i + 1) * FRAME_BYTES]))
+        depth = to_depth_mm(values, offset)
+        rows, cols = np.nonzero(~np.isnan(depth))
+        rows, cols = rows[::2], cols[::2]
+        z = depth[rows, cols]
+        p = np.column_stack(((cols - WIDTH / 2) * z / FOCAL, (rows - HEIGHT / 2) * z / FOCAL, z))
+        voxel_merge(sums, counts, p @ pose[:3, :3].T + pose[:3, 3])
+
     # Flip y back to up for viewing: maps use y down.
     number = np.array([counts[k] for k in sums], dtype=np.float32)
     points = np.array(list(sums.values()), dtype=np.float32) / number[:, None]
     points = points[number >= 2]
     points[:, 1] *= -1
     write_ply(args.out + ".ply", points)
-    print(f"{frames} frames, aligned {len(poses)}, lost {lost}, used {used}, {len(points)} points")
+    print(f"{frames} frames, aligned {len(frame_poses)}, lost {lost}, keyframes {len(keyframes)}")
+    print(f"loops {len(loops)}, used {len(chosen)} frames, {len(points)} points")
+    if gaps:
+        print(f"loop gaps: largest {max(g[2] for g in gaps):.1f} mm, {max(g[3] for g in gaps):.2f} deg")
     for name, yaw in (("front", 0.0), ("left", -0.75), ("right", 0.75)):
         render(points, yaw, 0.2, f"{args.out}-{name}.png")
 

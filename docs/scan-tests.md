@@ -33,3 +33,16 @@ and was wrong.
 
 This suggests the combined cloud's scale is right to within a few percent over about
 44 cm. It is one object on one pass, so it is not an accuracy figure.
+
+## Loop closure
+
+Date: 2026-10-31. `tools/align_pass.py` now records keyframes, checks each new keyframe
+against earlier nearby ones, and corrects the path with `tools/pose_graph.py`. A loop match
+needs at least 45% matched points, at most 1.5 mm RMS, and enough shape to fix position in
+every direction, which guards against flat scenes sliding.
+
+- Synthetic test: a loop edge removes at least 95% of injected drift on a 40-pose circle.
+  This tests the optimiser only, not loop detection on real data.
+- The desk pass found no loops, as expected from a pass that did not revisit its start,
+  and it produced the same point count as before: 1,663,314.
+- Real loop detection and drift are untested until a pass returns to its start.
