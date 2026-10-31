@@ -174,13 +174,14 @@ struct Capture {
     FILE* index = nullptr;
     std::vector<uint8_t> frame;
     size_t expected_size = 0;
+    size_t max_payload = 0;
     bool have_frame = false;
     bool last_frame_id = false;
     bool frame_error = false;
+    bool resyncing = false;
     uint32_t frame_pts = 0;
     uint64_t frames = 0;
-    uint64_t short_frames = 0;
-    uint64_t error_frames = 0;
+    uint64_t dropped_frames = 0;
     uint64_t bad_headers = 0;
     uint64_t failed_transfers = 0;
     int active_transfers = 0;
@@ -190,30 +191,48 @@ struct Capture {
     std::chrono::steady_clock::time_point last_frame;
 };
 
+void clear_frame(Capture& capture) {
+    capture.frame.clear();
+    capture.have_frame = false;
+    capture.frame_error = false;
+}
+
 void finish_frame(Capture& capture) {
     if (!capture.have_frame) return;
+    if (capture.frame_error || capture.frame.size() != capture.expected_size) {
+        capture.dropped_frames++;
+        clear_frame(capture);
+        return;
+    }
+
     const auto now = std::chrono::steady_clock::now();
     if (capture.frames == 0) capture.first_frame = now;
     capture.last_frame = now;
 
     const double ms = std::chrono::duration<double, std::milli>(now - capture.start).count();
     fwrite(capture.frame.data(), 1, capture.frame.size(), capture.data);
-    fprintf(capture.index, "%llu,%.3f,%zu,%u,%d\n", (unsigned long long)capture.frames, ms,
-            capture.frame.size(), capture.frame_pts, capture.frame_error ? 1 : 0);
+    fprintf(capture.index, "%llu,%.3f,%zu,%u,0\n", (unsigned long long)capture.frames, ms,
+            capture.frame.size(), capture.frame_pts);
 
     capture.frames++;
-    if (capture.frame.size() != capture.expected_size) capture.short_frames++;
-    if (capture.frame_error) capture.error_frames++;
-    capture.frame.clear();
-    capture.have_frame = false;
-    capture.frame_error = false;
+    clear_frame(capture);
 }
 
+// Leftover data from an earlier stream can shift reads off the payload boundaries.
+// A short transfer ends a payload, so the next one starts on a boundary again.
 void handle_payload(Capture& capture, const uint8_t* data, size_t size) {
     if (size == 0) return;
+    if (capture.resyncing) {
+        if (size < capture.max_payload) capture.resyncing = false;
+        return;
+    }
+
     const PayloadHeader header = parse_payload_header(data, size);
     if (!header.valid) {
         capture.bad_headers++;
+        if (capture.have_frame) capture.dropped_frames++;
+        clear_frame(capture);
+        capture.resyncing = size == capture.max_payload;
         return;
     }
 
@@ -291,6 +310,7 @@ int run_capture(libusb_device_handle* handle, const Stream& stream, const Format
 
     Capture capture;
     capture.expected_size = expected_size;
+    capture.max_payload = max_payload;
     capture.frame.reserve(expected_size);
     capture.data = fopen((prefix + ".raw").c_str(), "wb");
     capture.index = fopen((prefix + ".csv").c_str(), "w");
@@ -345,9 +365,9 @@ int run_capture(libusb_device_handle* handle, const Stream& stream, const Format
                                                       capture.first_frame).count();
     printf("frames %llu, %.2f fps, expected %zu bytes each\n", (unsigned long long)capture.frames,
            capture.frames > 1 && span > 0 ? (capture.frames - 1) / span : 0.0, expected_size);
-    printf("wrong-size frames %llu, flagged frames %llu, bad headers %llu, failed transfers %llu\n",
-           (unsigned long long)capture.short_frames, (unsigned long long)capture.error_frames,
-           (unsigned long long)capture.bad_headers, (unsigned long long)capture.failed_transfers);
+    printf("dropped frames %llu, bad headers %llu, failed transfers %llu\n",
+           (unsigned long long)capture.dropped_frames, (unsigned long long)capture.bad_headers,
+           (unsigned long long)capture.failed_transfers);
     if (no_data) {
         fprintf(stderr, "no frames arrived within %d seconds\n", kNoDataAbortSeconds);
         return 1;

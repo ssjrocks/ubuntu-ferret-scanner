@@ -13,7 +13,10 @@ int main() {
     assert(!header.error);
     assert(header.pts == 0x12345678);
 
-    const uint8_t minimal[] = {2, 0x40};
+    const uint8_t no_end_of_header[] = {2, 0x40};
+    assert(!parse_payload_header(no_end_of_header, sizeof no_end_of_header).valid);
+
+    const uint8_t minimal[] = {2, 0xC0};
     header = parse_payload_header(minimal, sizeof minimal);
     assert(header.valid);
     assert(header.error);
@@ -29,7 +32,7 @@ int main() {
     const uint8_t zero_length[] = {0, 0x80};
     assert(!parse_payload_header(zero_length, sizeof zero_length).valid);
 
-    const uint8_t pts_without_room[] = {2, 0x04, 0, 0, 0, 0};
+    const uint8_t pts_without_room[] = {2, 0x84, 0, 0, 0, 0};
     assert(!parse_payload_header(pts_without_room, sizeof pts_without_room).valid);
     return 0;
 }

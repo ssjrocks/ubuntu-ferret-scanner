@@ -3,7 +3,11 @@
 Saves raw frames from the scanner's UVC streams, including Y14, which the Linux
 camera driver cannot read. It sends only standard UVC requests.
 
-Status: `--list` is tested on a Ferret Pro. Streaming has not been tested yet.
+Status: tested on a Ferret Pro with depth Y14 and IR Y10 at 1280x800, 30 fps. The
+first 1-3 frames can be dropped if another stream ran on that camera shortly before.
+
+Only complete frames are saved. Y10 and Y14 pixels are packed, most significant bit
+first.
 
 ## Build
 

@@ -63,13 +63,14 @@ of 62 fields, 32 bits each. The data layout has not been read.
 ## Known issues
 
 - The kernel logs `Unknown video format` for GUID
-  `20343159-0000-0010-8000-00aa00389b71` (Y14), so that format may not be usable
-  through V4L2.
+  `20343159-0000-0010-8000-00aa00389b71` (Y14), and V4L2 does not offer that format.
+  Direct UVC access through libusb works.
 - The kernel logs a failed `GET_INFO` on unit 3 of the depth camera, control 18.
 
 ## Open questions
 
-- Do Y10 and Y14 carry full-range depth, and in what units?
+- What are the units of Y14 depth, and how do values map to distance?
+- What sets the depth working range, and can it be widened?
 - Where is the factory calibration stored, and how is it read?
 - Does valid depth need vendor commands first?
 - How does the WiFi bridge carry the data?
@@ -109,8 +110,36 @@ keyboard and objects from about 40 cm. No vendor commands were sent.
   on the scanner, not only raw images.
 - Sampled frames were 8-16% non-zero at 1280x800 and up to about 20% at 640x400,
   with a maximum value of 61.
-- Only the part of the scene in one corner had data, while IR showed the projected
-  dots across the whole scene. Y8 may be cutting off most of the depth range. This
-  is unproven.
-- Units and the meaning of the values are unknown.
+- Only part of the scene had data, while IR showed the projected dots across the
+  whole scene. Y14 showed the same limit, so Y8 is not the cause.
 - Depth MJPEG at 640x400 did not decode as JPEG.
+
+## Raw stream test
+
+Date: 2026-10-31. Source: `tools/ferret-capture`, with layouts scored by
+`tools/analyze_raw.py` on frames from the same desk scene.
+
+- Depth Y14 at 1280x800 ran at 30.0 fps. The first run on a rested stream had no
+  dropped frames, and individual keyboard keys are visible.
+- Pixels are a big-endian bitstream, most significant bit first: 7 bytes hold 4
+  Y14 pixels. The step between neighbouring pixels was 4 for this layout and 513 or
+  more for all others tried. IR Y10 uses the same layout (step 8, next best 32).
+- Depth value 0 appears to mean no data. Y14 values in the scene had a median of
+  1290 and a maximum of 2752.
+- Values grew towards the nearer end of the keyboard, so they do not behave like a
+  plain distance. They may be disparity-like. Units are unknown.
+- About 21% of the frame had depth, with values falling smoothly towards 0 at the
+  far edge of the keyboard. This suggests a limited working window, but what sets
+  it is unknown.
+- Payload size negotiated at 12288 bytes. PTS steps of about 33318 suggest a
+  microsecond clock.
+- A stream started soon after another on the same camera begins with leftover data,
+  which shifts reads off payload boundaries. `ferret-capture` now resyncs on the next
+  short transfer and drops bad frames, losing 1-3 frames at the start. The cause of
+  the leftover data is not proven.
+- The earlier YUYV warnings had the same sizes (multiples of about 12276 bytes,
+  12288 minus a 12-byte header), so they probably have the same cause. Unconfirmed.
+- Depth Y14, IR Y8 and RGB MJPEG ran together at 29.7, 29.4 and 28.8 fps with no
+  failed depth transfers. The scanner was facing a distant ceiling, so depth quality
+  under this load is untested.
+- Depth Y10 was not repeated after the resync fix, so its depth content is untested.

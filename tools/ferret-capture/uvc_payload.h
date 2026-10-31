@@ -18,7 +18,10 @@ inline PayloadHeader parse_payload_header(const uint8_t* data, size_t size) {
     PayloadHeader header;
     if (size < 2 || data[0] < 2 || data[0] > size) return header;
 
+    // The end-of-header bit helps reject image data read at the wrong position.
     const uint8_t info = data[1];
+    if (!(info & 0x80)) return header;
+
     header.length = data[0];
     header.frame_id = info & 0x01;
     header.end_of_frame = info & 0x02;
