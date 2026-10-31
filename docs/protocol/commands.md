@@ -152,7 +152,7 @@ fractional bits in a 14-bit value with 8 integer bits, the SDK's stated default.
 | Close | 8813 | About 20 cm | 20.2 cm |
 | Close | 1034 | About 30 cm | 30.6 cm |
 | Long | 4662 | About 41 cm | 41.5 cm |
-| Long | 2189-2350 | About 51.7 cm | 52.4-53.4 cm |
+| Long | 2189-2350 | About 51.7 cm | 52.5-53.4 cm |
 
 - The formula reads about 1-3% long against the tape. The tape started at the middle of
   the scanner, which may not be the optical origin.
