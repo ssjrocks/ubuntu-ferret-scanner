@@ -2,52 +2,12 @@
 //
 // The request format follows Orbbec's MIT-licensed SDK (see docs/protocol/commands.md).
 // This tool sends only get and read requests, so it cannot change a setting.
-#include <libusb.h>
-
-#include <chrono>
-#include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <thread>
-#include <vector>
+
+#include "scanner_link.h"
 
 namespace {
-
-constexpr uint16_t kVendorId = 0x2bc5;
-constexpr uint16_t kProductId = 0x069c;
-constexpr uint8_t kControlInterface = 0;
-constexpr uint8_t kExtensionUnit = 4;
-constexpr unsigned kTimeoutMs = 1000;
-constexpr int kAttempts = 3;
-
-constexpr uint8_t kControl512Bytes = 1;
-constexpr uint8_t kControl64Bytes = 2;
-constexpr uint8_t kControl1024Bytes = 3;
-constexpr uint16_t kRequestSize = 64;
-
-constexpr uint8_t kSetCur = 0x01;
-constexpr uint8_t kGetCur = 0x81;
-constexpr uint8_t kClassInterfaceOut = 0x21;
-constexpr uint8_t kClassInterfaceIn = 0xA1;
-
-constexpr uint16_t kRequestMagic = 0x4d47;
-constexpr uint16_t kResponseMagic = 0x4252;
-constexpr size_t kResponseHeaderSize = 10;
-constexpr uint32_t kChunkSize = 768;
-
-constexpr uint16_t kOpGetProperty = 1;
-constexpr uint16_t kOpGetStruct = 3;
-constexpr uint16_t kOpRawStart = 17;
-constexpr uint16_t kOpRawRead = 18;
-constexpr uint16_t kOpRawFinish = 19;
-constexpr uint16_t kOpListStart = 29;
-constexpr uint16_t kOpListRead = 30;
-constexpr uint16_t kOpListFinish = 31;
-
-constexpr uint16_t kBusyError = 0x0003;
-constexpr uint32_t kHangingRawBlock = 4027;
 
 struct Property {
     uint32_t id;
@@ -67,85 +27,6 @@ constexpr Property kProperties[] = {
     {196, "disparity search offset"},
     {271, "current disparity search range mode"},
     {272, "current disparity search offset"},
-};
-
-void write16(uint8_t* p, uint16_t value) {
-    p[0] = uint8_t(value);
-    p[1] = uint8_t(value >> 8);
-}
-
-void write32(uint8_t* p, uint32_t value) {
-    for (int i = 0; i < 4; i++) p[i] = uint8_t(value >> (8 * i));
-}
-
-uint16_t read16(const uint8_t* p) { return uint16_t(p[0]) | uint16_t(p[1]) << 8; }
-
-uint32_t read32(const uint8_t* p) {
-    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
-}
-
-struct Response {
-    bool ok = false;
-    uint16_t error = 0;
-    std::vector<uint8_t> data;  // everything after the header
-};
-
-class Scanner {
-public:
-    explicit Scanner(libusb_device_handle* handle) : handle_(handle) {}
-
-    Response transact(uint16_t opcode, const std::vector<uint32_t>& arguments, uint16_t reply_size) {
-        const uint16_t id = next_id_++;
-        uint8_t request[kRequestSize] = {};
-        write16(request, kRequestMagic);
-        write16(request + 2, uint16_t(arguments.size() * 2));
-        write16(request + 4, opcode);
-        write16(request + 6, id);
-        for (size_t i = 0; i < arguments.size(); i++) write32(request + 8 + 4 * i, arguments[i]);
-
-        uint8_t reply_control = kControl64Bytes;
-        if (reply_size > 512) reply_control = kControl1024Bytes;
-        else if (reply_size > 64) reply_control = kControl512Bytes;
-
-        Response response;
-        for (int attempt = 0; attempt < kAttempts; attempt++) {
-            if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            int result = libusb_control_transfer(handle_, kClassInterfaceOut, kSetCur,
-                                                 uint16_t(kControl64Bytes) << 8, index(), request,
-                                                 kRequestSize, kTimeoutMs);
-            if (result != kRequestSize) continue;
-
-            std::vector<uint8_t> reply(reply_size);
-            result = libusb_control_transfer(handle_, kClassInterfaceIn, kGetCur,
-                                             uint16_t(reply_control) << 8, index(), reply.data(),
-                                             reply_size, kTimeoutMs);
-            if (result < int(kResponseHeaderSize)) continue;
-            if (read16(reply.data()) != kResponseMagic || read16(reply.data() + 6) != id) continue;
-
-            response.error = read16(reply.data() + 8);
-            if (response.error == kBusyError) continue;
-            response.ok = response.error == 0;
-            if (response.ok) {
-                const size_t size = size_t(read16(reply.data() + 2)) * 2 + 8;
-                const size_t end = std::min<size_t>(size, size_t(result));
-                if (end > kResponseHeaderSize)
-                    response.data.assign(reply.begin() + kResponseHeaderSize, reply.begin() + end);
-            }
-            return response;
-        }
-        failed_ = true;
-        return response;
-    }
-
-    bool failed() const { return failed_; }
-
-private:
-    uint16_t index() const { return uint16_t(kExtensionUnit) << 8 | kControlInterface; }
-
-    libusb_device_handle* handle_;
-    uint16_t next_id_ = 1;
-    bool failed_ = false;
 };
 
 void print_property(Scanner& scanner, const Property& property) {

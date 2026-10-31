@@ -57,7 +57,7 @@ Of 130 properties documented in the SDK, 32 answered. Only get requests were sen
 
 ## Unknowns
 
-- What sets the depth range. The official app reaches past 40 cm.
+- Whether long-range mode matches the official app's range.
 - Whether settings survive a power cycle. The two non-default values may have been
   left by the official app or set at the factory.
 - Where the lens and alignment calibration can be read safely.
@@ -101,3 +101,24 @@ After the replug, colour and depth Y14 streamed at 30 fps with no USB errors.
 Read unknown blocks one at a time, and check the camera nodes after each.
 
 Device data contains the serial number and calibration, so keep it out of this repo.
+
+## Depth mode switching
+
+Date: 2026-10-31. Source: `ferret-mode`, Y14 at 1280x800, tripod-mounted scanner facing
+a box, shelf and monitor. Distances in this scene were not measured.
+
+Set structure (opcode 28) takes property ID 1043, command version 0 and a 52-byte record
+copied from raw block 4034. The header size field is 29 words, and the request is padded
+to 512 bytes on control 1. The SDK requires all streams to be stopped first.
+
+| Mode | Frame with depth | Repeat |
+|---|---|---|
+| `Close_range_mode Default` | 0% | 0% |
+| `Long_range_mode Default` | 61.8% | 60.2% |
+
+- The scanner accepted each switch at once, without leaving the USB bus or restarting.
+- A read after each switch reported the new mode.
+- Long-range values were about 2300 on the monitor and about 4600 on the box. The value
+  scale differs from close range, so close-range calibration does not carry over.
+- Not tested yet: whether the mode survives a power cycle, long-range distance limits,
+  depth accuracy, and how the official app behaves afterwards.

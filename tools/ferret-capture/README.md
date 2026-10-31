@@ -50,7 +50,20 @@ To read scanner settings without changing them:
 ./build/ferret-props
 ```
 
-It sends get-property requests only. See `docs/protocol/commands.md`.
+It sends get and read requests only. See `docs/protocol/commands.md`.
+
+To show depth modes, or preview a switch without sending it:
+
+```bash
+./build/ferret-mode
+```
+
+```bash
+./build/ferret-mode --set "Long_range_mode Default"
+```
+
+Add `--write` to send the switch. Only the two default modes are allowed, and no stream
+may be running.
 
 While it runs, the tool takes that camera from the Linux driver and gives it back on
 exit. If the tool is killed, replug the scanner to restore it.
