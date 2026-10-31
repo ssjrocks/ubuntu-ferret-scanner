@@ -171,7 +171,7 @@ The 30-second scan reached 0.63 mm and 9.58 million triangles in 71 s, with 9.32
 
 ## Box size check
 
-Date: 2026-10-31. Source: a tape-measured box, 79 x 30 mm, against saved depth frames after
+Date: 2026-10-31. Source: a tape-measured box, 79 x 120 x 30 mm, against saved depth frames after
 removing edge pixels. The edge window was tuned on these same frames, so this is not independent.
 
 | Distance | Width | Tape |
@@ -181,7 +181,8 @@ removing edge pixels. The edge window was tuned on these same frames, so this is
 | About 41 cm | 78.7 mm | 79 mm |
 
 - The box's 3 cm depth read 31.6 mm at about 32.5 cm.
-- Its long side read 120.2 mm. The tape note gave 22 cm, which doesn't match. Needs rechecking.
+- Its long side read 120.2 mm against 120 mm by tape. The first tape note of 22 cm was a
+  measuring slip, corrected by the owner.
 - A bug had let pixels beside holes through the edge filter. A test now covers that.
 - With the 5-pixel window, the 74-second scan builds at 0.7 mm, with 9.09 million triangles in
   211 s and a peak of 9.37 GB of GPU memory.
