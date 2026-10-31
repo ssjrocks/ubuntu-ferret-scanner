@@ -69,8 +69,7 @@ of 62 fields, 32 bits each. The data layout has not been read.
 
 ## Open questions
 
-- Which stream carries the depth used for scanning, and is it computed on the
-  scanner or from raw frames on the PC?
+- Do Y10 and Y14 carry full-range depth, and in what units?
 - Where is the factory calibration stored, and how is it read?
 - Does valid depth need vendor commands first?
 - How does the WiFi bridge carry the data?
@@ -94,9 +93,24 @@ nodes, which is unconfirmed.
 - ffmpeg flagged YUYV buffers as corrupted (about 12-48 KB reported) throughout
   the clip, yet all 90 frames were unique and every sampled row changed between
   neighbouring frames. The cause is unknown, so YUYV is not yet trustworthy.
-- The zero depth has no proven cause. Candidates: the ceiling is beyond the
-  listed 150-700 mm range, Y8 is not the real depth format, or vendor commands
-  are needed.
+- The all-zero depth was with a distant ceiling. Depth appeared at close range,
+  see below.
 - Y10 and Y14 could not be captured with ffmpeg: Y10 is listed as unsupported, and
   the kernel does not list Y14 at all.
 - Streams have not been run together. Calibration, IMU and WiFi are untested.
+
+## Close-range depth test
+
+Date: 2026-10-31. Source: 2-second V4L2 captures, scanner aimed at a desk with a
+keyboard and objects from about 40 cm. No vendor commands were sent.
+
+- `/dev/video0` in Y8 gave real structure: keyboard rows and key gaps are visible
+  in the 640x400 frames. The USB stream therefore carries depth-like data computed
+  on the scanner, not only raw images.
+- Sampled frames were 8-16% non-zero at 1280x800 and up to about 20% at 640x400,
+  with a maximum value of 61.
+- Only the part of the scene in one corner had data, while IR showed the projected
+  dots across the whole scene. Y8 may be cutting off most of the depth range. This
+  is unproven.
+- Units and the meaning of the values are unknown.
+- Depth MJPEG at 640x400 did not decode as JPEG.
