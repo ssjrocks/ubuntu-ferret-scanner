@@ -162,3 +162,16 @@ fractional bits in a 14-bit value with 8 integer bits, the SDK's stated default.
 - `focal` only applies to 1280x800. Other sizes are untested.
 - This gives distance along the camera axis at best. Lens centre and distortion are not
   known yet, so 3D accuracy is unmeasured.
+
+## Focal length cross-check
+
+Date: 2026-10-31. Source: a sewing tape along the shelf edge in the colour view. The
+tape's 1/16-inch ticks are 4.948 px apart at 1920x1080, so 3.117 px per mm at about
+412 mm by the depth formula. This is a rough check, not calibration.
+
+- Tape marks cannot be read in IR because the projected dots cover them.
+- The lighter box is 243 colour pixels wide, which gives about 78.3 mm.
+- The box is about 187-190 px wide in depth, which gives a focal length of about
+  990-1000. The stored value is 956.8. Depth edges often read slightly wide, so this
+  is an upper estimate.
+- Colour focal length is about 1284 px at 1920x1080. Measured from one distance only.
