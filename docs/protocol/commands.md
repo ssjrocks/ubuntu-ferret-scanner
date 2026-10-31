@@ -171,7 +171,7 @@ tape's 1/16-inch ticks are 4.948 px apart at 1920x1080, so 3.117 px per mm at ab
 
 - Tape marks cannot be read in IR because the projected dots cover them.
 - The lighter box is 243 colour pixels wide, which gives about 78.3 mm.
-- The box is about 187-190 px wide in depth, which gives a focal length of about
-  990-1000. The stored value is 956.8. Depth edges often read slightly wide, so this
-  is an upper estimate.
+- The box is about 187-190 px wide in depth and 186 px wide in IR, which gives a focal
+  length of about 983-1004. The stored value is 956.8. Depth edges often read slightly
+  wide, so this is an upper estimate.
 - Colour focal length is about 1284 px at 1920x1080. Measured from one distance only.
