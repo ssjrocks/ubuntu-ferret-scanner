@@ -31,6 +31,16 @@ Memory is only half of the problem. Tracking error builds up over long scans,
 so large scans also need loop closure and global alignment, or the model will
 bend and fail to meet itself. "No size limit" has to be proven on real scans.
 
+## Updates and problem reports
+
+`ubuntu-ferret-scanner update` checks this repo's latest GitHub release, and
+`ubuntu-ferret-scanner update --install` installs a verified newer wheel. Updates need
+a public repo or a release token. While this repo is private, the check finds nothing.
+
+Crashes and `ubuntu-ferret-scanner report "note"` send a report to the developer's own
+server (ssjrocks.com). A report holds the app version, a random install ID, PC model, OS
+and kernel, Python version, the stack trace and the app's log. It holds no scan data.
+
 ## Clean-room rules
 
 All code here must be written independently. See
