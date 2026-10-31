@@ -27,8 +27,15 @@ The models built from that 74-second scan, at 0.7 mm detail with about 9 million
 |---|---|
 | ![Bare 3D model of a cluttered desk with a keyboard and game controller](docs/images/model-bare.jpg) | ![Coloured 3D model of the same desk](docs/images/model-textured.jpg) |
 
-These come from one handheld scan on one desk, without touching it up. The green tint is RGB
-lighting in the room. Accuracy is still being measured, and a corner of the video is blurred
+Turning the same scan around shows the depth. Each clip links to a sharper MP4:
+
+| Point cloud | Bare model | Textured model |
+|---|---|---|
+| [![Rotating point cloud of the desk](docs/images/orbit-cloud.gif)](docs/images/orbit-cloud.mp4) | [![Rotating bare model of the desk](docs/images/orbit-bare.gif)](docs/images/orbit-bare.mp4) | [![Rotating textured model of the desk](docs/images/orbit-textured.gif)](docs/images/orbit-textured.mp4) |
+
+These come from one handheld scan on one desk, with no manual cleanup of the surfaces. The
+green tint is RGB lighting in the room. Accuracy is still being measured. For privacy, the left
+edge of the scan is cut from the rotating clips, and a corner of the replay video is blurred
 for its last 1.5 seconds to hide on-screen text.
 
 ## Run it
