@@ -46,3 +46,32 @@ every direction, which guards against flat scenes sliding.
 - The desk pass found no loops, as expected from a pass that did not revisit its start,
   and it produced the same point count as before: 1,663,314.
 - Real loop detection and drift are untested until a pass returns to its start.
+
+## First looping pass
+
+Date: 2026-10-31. Source: 30 seconds of long-range Y14, handheld, circling the desk about
+twice with overlap. It did not end at its starting view.
+
+| Measure | Result |
+|---|---|
+| Frames aligned | 897 of 897 |
+| Frame-to-keyframe error | 0.54 mm median RMS, 1.21 mm worst frame |
+| Scanner path | About 3.1 m |
+| Scanner speed | About 100 mm/s median, 286 mm/s peak |
+
+| Loop search | Matches | Largest gap | Median surface spread |
+|---|---|---|---|
+| None used for comparison | Not applicable | Not applicable | Not measured |
+| Default, 150 mm and 0.5 rad | 10 | 1.3 mm, 0.22 deg | 2.9 mm |
+| Wide, 300 mm and 1.2 rad | 72 | 3.7 mm, 0.97 deg | 4.17 mm |
+
+Surface spread is the median thickness in 8 mm columns of the cloud, across all surfaces.
+
+- The wide search matched the end of the path to its first keyframe. The gap there was
+  about 3.7 mm and 1 degree after about 2.6 m of travel. This is the first real drift
+  measurement, from one pass.
+- Correcting with the wide search made the surfaces thicker. Loop correction is not an
+  improvement yet, so the default remains the narrow search.
+- The cause is unproven. Unmodelled lens distortion is the main suspect, because the same
+  surface seen from different views would then disagree slightly.
+- Next: lens centre and distortion.

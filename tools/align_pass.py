@@ -164,14 +164,14 @@ def relative_angle(T):
     return np.arccos(np.clip((np.trace(T[:3, :3]) - 1) / 2, -1, 1))
 
 
-def find_loops(keyframes, newest):
+def find_loops(keyframes, newest, max_distance, max_angle):
     """Matches the newest keyframe against earlier ones close to it on the current path."""
     latest = keyframes[newest]
     scored = []
     for i in range(newest - LOOP_GAP_KEYFRAMES):
         relative = np.linalg.inv(keyframes[i]["pose"]) @ latest["pose"]
         distance = np.linalg.norm(relative[:3, 3])
-        if distance < LOOP_DISTANCE_MM and relative_angle(relative) < LOOP_ANGLE_RAD:
+        if distance < max_distance and relative_angle(relative) < max_angle:
             scored.append((distance, i, relative))
 
     loops = []
@@ -197,6 +197,8 @@ def main():
     parser.add_argument("--mode", choices=MODE_OFFSETS, default="long")
     parser.add_argument("--out", required=True, help="output path without an extension")
     parser.add_argument("--min-fill", type=float, default=0.05)
+    parser.add_argument("--loop-distance", type=float, default=LOOP_DISTANCE_MM)
+    parser.add_argument("--loop-angle", type=float, default=LOOP_ANGLE_RAD)
     args = parser.parse_args()
 
     offset = MODE_OFFSETS[args.mode]
@@ -246,7 +248,7 @@ def main():
             keyframes.append({"frame": i, "pose": pose, "levels": levels})
             frame_poses[i] = (len(keyframes) - 1, np.eye(4))
             T_key = np.eye(4)
-            loops.extend(find_loops(keyframes, len(keyframes) - 1))
+            loops.extend(find_loops(keyframes, len(keyframes) - 1, args.loop_distance, args.loop_angle))
         if i % 100 == 0:
             print(f"frame {i}/{frames}, keyframes {len(keyframes)}, loops {len(loops)}, lost {lost}",
                   flush=True)
