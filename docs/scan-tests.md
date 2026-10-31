@@ -74,4 +74,4 @@ Surface spread is the median thickness in 8 mm columns of the cloud, across all 
   improvement yet, so the default remains the narrow search.
 - The cause is unproven. Unmodelled lens distortion is the main suspect, because the same
   surface seen from different views would then disagree slightly.
-- Next: lens centre and distortion.
+- Next: lens centre and distortion. See `protocol/camera-layout.md`.
