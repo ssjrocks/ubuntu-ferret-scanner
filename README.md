@@ -104,6 +104,7 @@ Main dependencies and their licences:
 | libusb 1.0 | LGPL-2.1, linked dynamically |
 | PyTorch | BSD-style, with Apache-2.0 and other bundled licences |
 | NumPy, SciPy, scikit-image, PyOpenGL | BSD-style |
+| OpenCV (headless) | Apache-2.0 |
 | Pillow | MIT-CMU |
 
 The scanner command format follows Orbbec SDK v2, whose core is under the MIT licence,

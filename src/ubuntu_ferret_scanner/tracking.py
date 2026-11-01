@@ -15,7 +15,14 @@ MIN_NORMAL_COS = 0.7
 KEYFRAME_MM = 25.0
 KEYFRAME_RAD = 0.09
 LOST_INLIERS = 0.25
+LOST_RMS_MM = 2.0  # real frames stayed under 1.7, wrong jumps were up to 3.5
+WEAK_INLIERS = 0.45  # low overlap is fine while the fit is tight, as a view changes
+WEAK_RMS_MM = 1.2
+KEYFRAME_INLIERS = 0.6  # take a new reference before overlap runs out
 MIN_MATCHES = 200
+MIN_FILL = 0.05  # share of the frame that must have depth
+MAX_STEP_MM = 30.0  # 0.9 m/s, about twice the fastest real scan so far
+MAX_STEP_RAD = 0.2
 
 
 def downscale(depth, factor):
@@ -52,6 +59,15 @@ class Level:
         self.normals = torch.full(self.vertices.shape, float("nan"), device=depth.device)
         self.normals[1:-1, 1:-1] = normals
         self.valid = ~self.normals.isnan().any(dim=2)
+
+
+    def to(self, device):
+        moved = Level.__new__(Level)
+        moved.__dict__.update(self.__dict__)
+        moved.vertices = self.vertices.to(device)
+        moved.normals = self.normals.to(device)
+        moved.valid = self.valid.to(device)
+        return moved
 
 
 def build_levels(depth):
@@ -135,6 +151,9 @@ class Tracker:
 
     def feed(self, depth):
         levels = build_levels(depth)
+        if float((~depth.isnan()).float().mean()) < MIN_FILL:
+            self.step = torch.eye(4, dtype=torch.float64, device=self.device)
+            return TrackResult("lost", None), levels
         if self.key_levels is None:
             self.key_levels = levels
             return TrackResult("first", self.key_pose.clone(), new_keyframe=True), levels
@@ -144,24 +163,28 @@ class Tracker:
             T, inliers, rms, _ = icp_level(levels[factor], self.key_levels[factor], T)
             if inliers == 0.0:
                 break
-        if inliers < LOST_INLIERS:
+        step = T @ torch.linalg.inv(self.T_key)
+        jumped = float(step[:3, 3].norm()) > MAX_STEP_MM or relative_angle(step) > MAX_STEP_RAD
+        weak = inliers < WEAK_INLIERS and rms > WEAK_RMS_MM
+        if inliers < LOST_INLIERS or rms > LOST_RMS_MM or weak or jumped:
             self.step = torch.eye(4, dtype=torch.float64, device=self.device)
             return TrackResult("lost", None, inliers), levels
 
-        self.step = T @ torch.linalg.inv(self.T_key)
+        self.step = step
         self.T_key = T
         pose = self.key_pose @ T
         result = TrackResult("ok", pose, inliers, rms)
-        if float(T[:3, 3].norm()) > KEYFRAME_MM or relative_angle(T) > KEYFRAME_RAD:
+        moved = float(T[:3, 3].norm()) > KEYFRAME_MM or relative_angle(T) > KEYFRAME_RAD
+        if moved or inliers < KEYFRAME_INLIERS:
             self.key_pose = pose
             self.key_levels = levels
             self.T_key = torch.eye(4, dtype=torch.float64, device=self.device)
             result.new_keyframe = True
         return result, levels
 
-    def rejoin(self, key_pose, key_levels, T):
-        """Continues tracking from a keyframe after being lost."""
-        self.key_pose = key_pose
-        self.key_levels = key_levels
-        self.T_key = T.clone()
+    def rejoin(self, pose, levels):
+        """Continues tracking after being lost, with this frame as the new reference."""
+        self.key_pose = pose
+        self.key_levels = levels
+        self.T_key = torch.eye(4, dtype=torch.float64, device=self.device)
         self.step = torch.eye(4, dtype=torch.float64, device=self.device)

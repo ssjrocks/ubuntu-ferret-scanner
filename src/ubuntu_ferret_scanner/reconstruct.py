@@ -11,7 +11,6 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image, ImageFilter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -22,16 +21,19 @@ from ubuntu_ferret_scanner.calibration import (
     CENTRE_Y,
     COLOUR_SIZE,
     DEPTH_BYTES,
+    EDGE_WINDOW,
     FOCAL,
     HEIGHT,
     MODE_OFFSETS,
     WIDTH,
     decode_y14,
     project_to_colour,
+    remove_edges,
     to_depth_mm,
 )
 from ubuntu_ferret_scanner.pose_graph import edge_error, optimize
 from ubuntu_ferret_scanner.ply import camera_to_view, write_cloud, write_mesh, write_stl
+from ubuntu_ferret_scanner.relocalise import Relocaliser, decode_jpeg, describe
 from ubuntu_ferret_scanner.session import ColourFrames, Session, read_index
 from ubuntu_ferret_scanner.settings import Settings, device_for
 from ubuntu_ferret_scanner.tracking import DOWNSCALES, Tracker, icp_level
@@ -48,8 +50,10 @@ REFINE_SEARCH_MM = (40.0, 25.0, 15.0, 10.0)
 REFINE_CANDIDATES = 6
 MAX_LOOP_ERROR_MM = 6.0
 MAX_LOOP_ERROR_RAD = 0.02
-RELOCALISE_EVERY = 5
-RELOCALISE_KEYFRAMES = 60
+NEW_SEGMENT_FRAMES = 6
+LINK_AGREEMENT = 2
+LINK_AGREE_MM = 15.0
+LINK_AGREE_RAD = 0.08
 
 CLOUD_VOXEL_MM = 1.5
 MERGE_BATCH_POINTS = 30_000_000
@@ -59,7 +63,7 @@ MIN_VOTES = 2
 
 EDGE_JUMP_MM = 12.0
 SYNC_FRAMES = 24
-SYNC_RANGE_MS = 600
+SYNC_RANGE_MS = 198  # app recordings share one clock, so the true shift is small
 SYNC_STEP_MS = 33
 
 BYTES_PER_VOXEL = 24
@@ -71,8 +75,6 @@ TRUNCATION_MM = 3.0
 MIN_TRUNCATION_VOXELS = 3
 MIN_WEIGHT = 6.0
 MIN_PIECE_FACES = 300
-EDGE_WINDOW = 5  # near objects read about 3.4 pixels too wide on each side
-EDGE_LIMIT_MM = 6.0
 COLOUR_BAND_VOXELS = 1.5
 MIN_FACING = 0.25
 GAIN_LIMITS = (0.6, 1.6)
@@ -97,16 +99,6 @@ class DepthFrames:
 
     def read_clean(self, index):
         return remove_edges(self.read(index))
-
-
-def remove_edges(depth):
-    """Drops pixels beside depth jumps and holes, where stereo matching is unreliable."""
-    holes_far = depth.nan_to_num(nan=1e5)[None, None]
-    holes_near = depth.nan_to_num(nan=0.0)[None, None]
-    padding = EDGE_WINDOW // 2
-    highest = F.max_pool2d(holes_far, EDGE_WINDOW, 1, padding)
-    lowest = -F.max_pool2d(-holes_near, EDGE_WINDOW, 1, padding)
-    return torch.where((highest - lowest)[0, 0] > EDGE_LIMIT_MM, float("nan"), depth)
 
 
 def match_keyframes(a, b, guess, search_mm):
@@ -172,65 +164,146 @@ def outlier_free(poses, loop):
     return np.linalg.norm(error[3:]) < MAX_LOOP_ERROR_MM and np.linalg.norm(error[:3]) < MAX_LOOP_ERROR_RAD
 
 
-def relocalise(keyframes, levels, device):
-    """Tries to rejoin earlier keyframes after tracking is lost."""
-    finest = DOWNSCALES[-1]
-    newest = len(keyframes) - 1
-    for index in range(newest, max(newest - RELOCALISE_KEYFRAMES, -1), -1):
-        key = keyframes[index]
-        T = torch.eye(4, dtype=torch.float64, device=device)
-        for factor in DOWNSCALES:
-            T, inliers, _, _ = icp_level(levels[factor], key["levels"][factor], T, LOOP_SEARCH_MM)
-            if inliers == 0.0:
-                break
-        if inliers == 0.0:
-            continue
-        T, inliers, rms, condition = icp_level(levels[finest], key["levels"][finest], T)
-        if inliers >= LOOP_INLIERS and rms <= LOOP_RMS_MM and condition >= LOOP_MIN_CONDITION:
-            return index, T
-    return None, None
+def add_keyframe(keyframes, relocaliser, colour, depth_ms, frame, depth, levels, pose, segment):
+    view = None
+    picture = None
+    if colour is not None:
+        index = colour.nearest(depth_ms[frame])
+        picture = decode_jpeg(colour.read(index))
+    if picture is not None:
+        view = describe(depth, picture)
+    number = len(keyframes)
+    keyframes.append({"pose": pose, "levels": levels, "segment": segment, "view": view})
+    if view is not None:
+        relocaliser.add(number, view, levels)
+    return number
 
 
-def align(depth_frames, count, device):
+def link_segments(keyframes, relocaliser, edges):
+    """Places separated pieces of the scan together using shared views.
+
+    Returns the world transform of each joined segment. Two matches must agree before a piece
+    is joined, because a piece joined in the wrong place would ruin the whole model.
+    """
+    members = {}
+    for number, key in enumerate(keyframes):
+        members.setdefault(key["segment"], []).append(number)
+    main = max(members, key=lambda segment: len(members[segment]))
+    placed = {main: np.eye(4)}
+
+    def pose_of(key):
+        return keyframes[key]["pose"].cpu().numpy()
+
+    def try_join(segment, estimates):
+        """Joins a segment once enough estimates of its position agree."""
+        link = estimates[-1][0]
+        agreeing = [e for e in estimates if transforms_agree(e[0], link)]
+        if len(agreeing) < LINK_AGREEMENT:
+            return False
+        placed[segment] = link
+        edges.extend(e[1] for e in agreeing)
+        return True
+
+    changed = True
+    while changed and len(placed) < len(members):
+        changed = False
+        ready = {k for segment in placed for k in members[segment] if keyframes[k]["view"] is not None}
+        for segment, keys in members.items():
+            if segment in placed:
+                continue
+            say("Rejoining scan pieces", len(placed) / len(members))
+            estimates = []
+            options = {k for k in keys if keyframes[k]["view"] is not None}
+            # Matching isn't symmetrical, so search from both sides.
+            for k in sorted(options):
+                match = relocaliser.find(keyframes[k]["view"], keyframes[k]["levels"], ready)
+                if match is None:
+                    continue
+                other = placed[keyframes[match.key]["segment"]] @ pose_of(match.key)
+                T = match.T.cpu().numpy()
+                estimates.append((other @ T @ np.linalg.inv(pose_of(k)), (match.key, k, T, 1.0)))
+                changed = try_join(segment, estimates)
+                if changed:
+                    break
+            if changed:
+                continue
+            for k in sorted(ready):
+                match = relocaliser.find(keyframes[k]["view"], keyframes[k]["levels"], options)
+                if match is None:
+                    continue
+                here = placed[keyframes[k]["segment"]] @ pose_of(k)
+                T = match.T.cpu().numpy()
+                link = here @ np.linalg.inv(T) @ np.linalg.inv(pose_of(match.key))
+                estimates.append((link, (match.key, k, T, 1.0)))
+                changed = try_join(segment, estimates)
+                if changed:
+                    break
+    return placed
+
+
+def transforms_agree(a, b):
+    difference = np.linalg.inv(a) @ b
+    angle = np.arccos(np.clip((np.trace(difference[:3, :3]) - 1) / 2, -1, 1))
+    return np.linalg.norm(difference[:3, 3]) < LINK_AGREE_MM and angle < LINK_AGREE_RAD
+
+
+def align(depth_frames, colour, depth_ms, count, device):
     """Tracks every frame and corrects the path. Returns {frame: 4x4 pose} and stats."""
     tracker = Tracker(device)
+    relocaliser = Relocaliser(device)
     keyframes, edges, placed = [], [], {}
-    lost, rejoined = 0, 0
-    current = 0
+    lost, lost_run, segment = 0, 0, 0
+    current = None
+    identity = torch.eye(4, dtype=torch.float64, device=device)
     for i in range(count):
         depth = depth_frames.read(i)
-        if float((~depth.isnan()).float().mean()) < 0.05:
-            continue
         result, levels = tracker.feed(depth)
-        if result.state == "first":
-            keyframes.append({"pose": result.pose, "levels": levels})
-            placed[i] = (0, torch.eye(4, dtype=torch.float64, device=device))
-            continue
         if result.state == "lost":
             lost += 1
-            if lost % RELOCALISE_EVERY == 0:
-                index, T = relocalise(keyframes, levels, device)
-                if index is not None:
-                    current = index
-                    tracker.rejoin(keyframes[index]["pose"], keyframes[index]["levels"], T)
-                    placed[i] = (current, T.clone())
-                    rejoined += 1
+            lost_run += 1
+            # Stop waiting and start a new piece, which can be joined up after tracking.
+            if lost_run >= NEW_SEGMENT_FRAMES and current is not None:
+                tracker = Tracker(device)
+                segment += 1
+                current = None
             continue
 
-        if result.new_keyframe:
-            relative = torch.linalg.inv(keyframes[current]["pose"]) @ result.pose
-            edges.append((current, len(keyframes), relative.cpu().numpy(), 1.0))
-            keyframes.append({"pose": result.pose, "levels": levels})
-            current = len(keyframes) - 1
-            placed[i] = (current, torch.eye(4, dtype=torch.float64, device=device))
+        lost_run = 0
+        if result.state == "first" or result.new_keyframe:
+            number = add_keyframe(
+                keyframes, relocaliser, colour, depth_ms, i, depth, levels, result.pose, segment
+            )
+            if current is not None:
+                relative = torch.linalg.inv(keyframes[current]["pose"]) @ result.pose
+                edges.append((current, number, relative.cpu().numpy(), 1.0))
+            current = number
+            placed[i] = (current, identity)
         else:
             placed[i] = (current, tracker.T_key.clone())
         if i % 20 == 0:
             say("Aligning frames", i / count)
 
-    corrected, stats = refine(keyframes, edges, device)
-    poses = {i: corrected[key] @ T.cpu().numpy() for i, (key, T) in placed.items()}
-    return poses, {"lost": lost, "rejoined": rejoined, "keyframes": len(keyframes), **stats}
+    segments = link_segments(keyframes, relocaliser, edges)
+    keep = [n for n, key in enumerate(keyframes) if key["segment"] in segments]
+    renumber = {old: new for new, old in enumerate(keep)}
+    joined = []
+    for n in keep:
+        key = dict(keyframes[n])
+        world = segments[key["segment"]]
+        key["pose"] = torch.from_numpy(world @ key["pose"].cpu().numpy()).to(device)
+        joined.append(key)
+    edges = [(renumber[a], renumber[b], m, w) for a, b, m, w in edges if a in renumber and b in renumber]
+
+    corrected, stats = refine(joined, edges, device)
+    poses = {i: corrected[renumber[key]] @ T.cpu().numpy() for i, (key, T) in placed.items() if key in renumber}
+    return poses, {
+        "lost": lost,
+        "pieces": len({key["segment"] for key in keyframes}),
+        "pieces_joined": len(segments),
+        "unjoined_frames": len(placed) - len(poses),
+        "keyframes": len(joined),
+        **stats,
+    }
 
 
 def load_edges(data):
@@ -261,7 +334,12 @@ def depth_edges(depth):
 def find_time_shift(depth_frames, depth_ms, colour, poses):
     """Finds the shift to add to colour times, by landing depth edges on colour edges."""
     ordered = sorted(poses)
-    speed = {b: float(np.linalg.norm(poses[b][:3, 3] - poses[a][:3, 3])) for a, b in zip(ordered, ordered[1:])}
+    # Only neighbouring frames: a jump between frames either side of a loss isn't real speed.
+    speed = {
+        b: float(np.linalg.norm(poses[b][:3, 3] - poses[a][:3, 3]))
+        for a, b in zip(ordered, ordered[1:])
+        if b == a + 1
+    }
     fastest = sorted(speed, key=speed.get, reverse=True)[: SYNC_FRAMES * 3]
     prepared = []
     for i in sorted(fastest)[:: 3]:
@@ -617,7 +695,7 @@ def build(folder, settings):
     colour = ColourFrames(session)
 
     say("Aligning frames", 0.0)
-    poses, stats = align(depth_frames, count, device)
+    poses, stats = align(depth_frames, colour, depth_ms, count, device)
     with open(session.poses_path, "w") as f:
         for i in sorted(poses):
             f.write(f"{i}," + ",".join(f"{x:.9g}" for x in poses[i].ravel()) + "\n")

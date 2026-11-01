@@ -2,10 +2,11 @@
 import json
 import logging
 import sys
+import tempfile
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess
+from PyQt6.QtCore import QProcess, Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -34,6 +35,8 @@ from ubuntu_ferret_scanner.stream import ScannerSource
 
 LOG = logging.getLogger(__name__)
 MODE_LABELS = {"Long range (20-72 cm)": LONG_MODE, "Close range (15-33 cm)": CLOSE_MODE}
+LOST_STYLE = "background: #c0392b; color: white; font-weight: bold; padding: 8px; border-radius: 4px;"
+RECOVERED_STYLE = "background: #2a7d46; color: white; font-weight: bold; padding: 8px; border-radius: 4px;"
 STYLE = """
 QMainWindow, QWidget { background: #1a1c21; color: #dde; }
 QPushButton { background: #2c303a; border: 1px solid #40454f; border-radius: 4px; padding: 7px 14px; }
@@ -107,6 +110,12 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Connect the scanner, or open a saved scan.")
         self.link_note = QLabel("")
         self.link_note.setStyleSheet("color: #e0a030;")
+        self.banner = QLabel("")
+        self.banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.banner.setVisible(False)
+        self.banner_timer = QTimer(self)
+        self.banner_timer.setSingleShot(True)
+        self.banner_timer.timeout.connect(lambda: self.banner.setVisible(False))
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         self.progress_label = QLabel("")
@@ -133,6 +142,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addLayout(controls)
         layout.addLayout(view_row)
+        layout.addWidget(self.banner)
         layout.addLayout(viewer, 1)
         layout.addWidget(self.status)
         central = QWidget()
@@ -194,6 +204,7 @@ class MainWindow(QMainWindow):
         self.scanning = False
         self.replaying = False
         self.gauge.set_distance(None)
+        self.banner.setVisible(False)
         for tile in (self.colour_tile, self.ir_tile, self.depth_tile):
             tile.clear()
 
@@ -214,6 +225,7 @@ class MainWindow(QMainWindow):
             self.capture.send("stop_scan")
 
     def on_scan_stopped(self, folder):
+        self.banner.setVisible(False)
         if self.replaying:
             return
         self.session = Session(folder)
@@ -246,14 +258,30 @@ class MainWindow(QMainWindow):
         if update.points is not None and len(update.points):
             self.view.add_points(update.points, update.colours)
         if self.scanning or self.replaying:
-            names = {"lost": "Tracking lost: go back to something already scanned", "ok": "Tracking",
-                     "first": "Tracking", "idle": "Starting"}
+            self.show_tracking(update.state)
+            names = {"lost": "Tracking lost", "ok": "Tracking", "first": "Tracking", "idle": "Starting",
+                     "recovered": "Tracking recovered"}
             elapsed = time.monotonic() - self.scan_started
             self.status.setText(
                 f"{names.get(update.state, update.state)}   |   {elapsed:.0f} s   |   {update.frames} frames   |   "
                 f"{update.total_points:,} points   |   {update.process_ms:.0f} ms per frame   |   "
-                f"lost {update.lost_frames}, recording drops {update.extra.get('lost', 0)}"
+                f"lost frames {update.lost_frames}, recoveries {update.recoveries}, "
+                f"recording drops {update.extra.get('lost', 0)}"
             )
+
+    def show_tracking(self, state):
+        if state == "lost":
+            self.banner_timer.stop()
+            self.banner.setText("Tracking lost. Hold still and point at something you've already scanned.")
+            self.banner.setStyleSheet(LOST_STYLE)
+            self.banner.setVisible(True)
+        elif state == "recovered":
+            self.banner.setText("Tracking recovered. Carry on scanning.")
+            self.banner.setStyleSheet(RECOVERED_STYLE)
+            self.banner.setVisible(True)
+            self.banner_timer.start(2500)
+        elif not self.banner_timer.isActive():
+            self.banner.setVisible(False)
 
     def on_failed(self, message):
         LOG.error("capture failed: %s", message)
@@ -273,7 +301,8 @@ class MainWindow(QMainWindow):
     def start_replay(self, folder, speed=1.0):
         self.stop_capture()
         self.open_session(folder, load=False)
-        scratch = Path(folder) / ".replay"
+        self.replay_scratch = tempfile.TemporaryDirectory(prefix="ferret-replay-")
+        scratch = Path(self.replay_scratch.name)
         self.view.reset_points()
         self.view.set_mode("points")
         self.replaying = True
@@ -344,6 +373,8 @@ class MainWindow(QMainWindow):
                 self.status.setText(
                     f"Built in {s['seconds']:.0f} s: {s['aligned']} frames, {s['points']:,} points, "
                     f"{s['triangles']:,} triangles at {s['voxel_mm']} mm, {s['loops']} loop matches."
+                    + (f" Scan pieces joined: {s['pieces_joined']} of {s['pieces']}." if s["pieces"] > 1 else "")
+                    + (f" {s['unjoined_frames']} frames couldn't be placed." if s["unjoined_frames"] else "")
                 )
 
     def on_build_finished(self, code, status):

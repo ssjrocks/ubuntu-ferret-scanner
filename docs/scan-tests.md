@@ -134,7 +134,8 @@ Two changes fixed most of this:
   surfaces. Accuracy against a reference is not measured.
 - The 30-second scan still builds, with a 2.6 mm gap before correction and 0.5 mm after.
 - Meshes now drop loose pieces under 300 faces, and voxels need at least 6 samples.
-- Tracking can rejoin earlier keyframes after being lost, but this has only worked once.
+- Tracking could rejoin earlier keyframes after being lost, but this had only worked once.
+  The newer relocalisation section replaces this.
 - Moving subjects are not supported. The method assumes the whole scene is rigid, so a person
   shifting or breathing breaks tracking and fusion.
 - Flat desk areas still show faint ripples. Cause unknown.
@@ -187,3 +188,53 @@ removing edge pixels. The edge window was tuned on these same frames, so this is
 - With the 5-pixel window, the 74-second scan builds at 0.7 mm, with 9.09 million triangles in
   211 s and a peak of 9.37 GB of GPU memory.
 - One object is not a general accuracy figure. Keyboard scale has not been remeasured.
+
+## Recovery from tracking loss
+
+Date: 2026-11-01. All tests below are simulated from two desk recordings, with their refined
+paths as the reference. Real tracking loss in a live scan has not been tested on these changes.
+
+How it works:
+
+- Each keyframe saves ORB colour features with 3D positions from depth. Features are matched,
+  solved with RANSAC, and then ICP on depth must confirm the result. Colour alone can't place
+  the scanner.
+- While scanning, a position must be found twice before tracking resumes, restarting from the
+  current frame. Lost frames are still recorded.
+- When building, tracking starts a new piece after 6 lost frames. Pieces join once two matches
+  agree, searching from both sides, and pieces that can't be joined are left out and reported.
+- Tracking now fails on poor fit, weak overlap with poor fit, or an impossible step. Before this,
+  a jump could keep tracking without any warning, up to 98 mm off the reference path.
+
+| Test | Result |
+|---|---|
+| Normal frames wrongly marked lost | 0 of 3,112 |
+| Views that could be found, and were (30-second scan) | 149 of 257 (58%), per frame |
+| Position error of accepted views | 2.5 mm at the 95th percentile, 4.0 mm at worst |
+| Mirrored or wrong-colour views accepted | 0 of 350 |
+| Live recovery from 9 simulated breaks that returned to scanned areas | 6-12 frames |
+| Tracking wrong without being flagged, in those breaks | 0 frames |
+
+- Match error was under 1.3 mm in 8 of the 9 breaks, and 10.4 mm in the other. That one is
+  unexplained.
+- After a recovery onto an earlier lap, the live cloud can sit about 20-35 mm off the corrected
+  path. That matches the known gap between laps, which the build corrects.
+- If the scanner comes back over areas not yet scanned, it stays lost until it reaches a scanned
+  area. Frames meanwhile are recorded, so the build can often still use them.
+
+Build tests, with chunks removed from copies of the recordings:
+
+| Scan | Removed | Pieces joined | Frames placed | Error against reference |
+|---|---|---|---|---|
+| 30-second | 125 frames in 2 chunks | 3 of 3 | 760 of 772 | 2.7 mm median, 8.6 mm worst |
+| 74-second | 290 frames in 3 chunks | 4 of 4 | 1,907 of 1,925 | 2.6 mm median, 11.1 mm worst |
+
+- The rebuilt 74-second model has no visible doubling at the joins, and a small rough streak on
+  the desk near the radio.
+- Full scans with no loss still place every frame, with 0 lost.
+- Scans now start safely if the first frames have no depth. Before this, an empty first frame
+  became the reference and tracking could never begin.
+- Colour timing is now searched within 198 ms and ignores jumps across a break. A wrong result
+  of -501 ms was seen before this fix.
+- Relocalising took about 36 ms typically, and 112 ms in the app test. Recovery needs colour, so
+  it won't work in darkness or on plain surfaces with few features.

@@ -18,7 +18,9 @@ from ubuntu_ferret_scanner.reconstruct import (
     remove_edges,
     remove_small_pieces,
 )
+from ubuntu_ferret_scanner.relocalise import MIN_RANSAC_INLIERS, Relocaliser, View, ransac
 from ubuntu_ferret_scanner.settings import RESERVED_THREADS, Settings
+from ubuntu_ferret_scanner.tracking import Tracker
 
 
 class Decoding(unittest.TestCase):
@@ -39,6 +41,52 @@ class Decoding(unittest.TestCase):
         near, far = calibration.depth_limits(calibration.LONG_MODE)
         self.assertAlmostEqual(near, 201, delta=2)
         self.assertAlmostEqual(far, 717, delta=2)
+
+
+class Tracking(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cpu")
+        rows, cols = torch.meshgrid(torch.arange(800.0), torch.arange(1280.0), indexing="ij")
+        self.scene = 400 + 40 * torch.sin(cols / 90) * torch.cos(rows / 70)
+
+    def test_empty_first_frame_does_not_become_the_reference(self):
+        tracker = Tracker(self.device)
+        empty = torch.full((800, 1280), float("nan"))
+        self.assertEqual(tracker.feed(empty)[0].state, "lost")
+        self.assertIsNone(tracker.key_levels)
+        self.assertEqual(tracker.feed(self.scene)[0].state, "first")
+
+    def test_steady_frames_track_and_empty_frames_are_lost(self):
+        tracker = Tracker(self.device)
+        tracker.feed(self.scene)
+        self.assertEqual(tracker.feed(self.scene)[0].state, "ok")
+        self.assertEqual(tracker.feed(torch.full((800, 1280), float("nan")))[0].state, "lost")
+        self.assertEqual(tracker.feed(self.scene)[0].state, "ok")
+
+
+class Relocalising(unittest.TestCase):
+    def test_rigid_solver_recovers_a_known_move(self):
+        rng = np.random.default_rng(3)
+        source = torch.tensor(rng.uniform(-100, 100, (200, 3)) + [0, 0, 400], dtype=torch.float32)
+        angle = torch.tensor(0.4)
+        rotation = torch.tensor(
+            [[torch.cos(angle), -torch.sin(angle), 0], [torch.sin(angle), torch.cos(angle), 0], [0, 0, 1]]
+        )
+        shift = torch.tensor([12.0, -7.0, 30.0])
+        target = source @ rotation.T + shift
+        target[:40] += 50  # outliers
+        T, inliers = ransac(source, target, torch.device("cpu"))
+        self.assertEqual(inliers, 160)
+        self.assertLess(float((T[:3, :3].float() - rotation).abs().max()), 1e-3)
+        self.assertLess(float((T[:3, 3].float() - shift).abs().max()), 1e-2)
+
+    def test_an_empty_map_finds_nothing(self):
+        view = View(np.zeros((50, 3), np.float32), np.zeros((50, 32), np.uint8))
+        self.assertIsNone(Relocaliser(torch.device("cpu")).find(view, {}))
+
+    def test_too_few_matches_are_refused(self):
+        points = torch.zeros(MIN_RANSAC_INLIERS - 1, 3)
+        self.assertEqual(ransac(points, points, torch.device("cpu"))[0], None)
 
 
 class Files(unittest.TestCase):

@@ -4,6 +4,7 @@ The values are from one Ferret Pro and are documented in docs/protocol/. Other s
 need their own read from the device.
 """
 import torch
+import torch.nn.functional as F
 
 WIDTH, HEIGHT = 1280, 800
 DEPTH_BYTES = WIDTH * HEIGHT * 14 // 8
@@ -13,6 +14,9 @@ BASELINE = 149.907
 FOCAL = 956.7727
 CENTRE_X = 645.56445
 CENTRE_Y = 401.40128
+
+EDGE_WINDOW = 5  # near objects read about 3.4 pixels too wide on each side
+EDGE_LIMIT_MM = 6.0
 
 CLOSE_MODE = "Close_range_mode Default"
 LONG_MODE = "Long_range_mode Default"
@@ -58,6 +62,16 @@ def to_depth_mm(values, offset):
     """Depth in mm as float32, with NaN where the scanner returned no depth."""
     depth = UNIT * BASELINE * FOCAL / (values.to(torch.float32) / 64.0 + offset)
     return torch.where(values > 0, depth, torch.tensor(float("nan"), device=values.device))
+
+
+def remove_edges(depth):
+    """Drops pixels beside depth jumps and holes, where stereo matching is unreliable."""
+    holes_far = depth.nan_to_num(nan=1e5)[None, None]
+    holes_near = depth.nan_to_num(nan=0.0)[None, None]
+    padding = EDGE_WINDOW // 2
+    highest = F.max_pool2d(holes_far, EDGE_WINDOW, 1, padding)
+    lowest = -F.max_pool2d(-holes_near, EDGE_WINDOW, 1, padding)
+    return torch.where((highest - lowest)[0, 0] > EDGE_LIMIT_MM, float("nan"), depth)
 
 
 def project_to_colour(points):

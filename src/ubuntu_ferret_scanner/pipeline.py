@@ -1,11 +1,9 @@
 """Turns live frames into previews, a depth reading, tracking and the rough live cloud."""
-import io
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from PIL import Image
 
 from ubuntu_ferret_scanner.calibration import (
     CENTRE_X,
@@ -21,14 +19,18 @@ from ubuntu_ferret_scanner.calibration import (
     to_depth_mm,
 )
 from ubuntu_ferret_scanner.ply import camera_to_view
-from ubuntu_ferret_scanner.tracking import Tracker
+from ubuntu_ferret_scanner.relocalise import COLOUR_DRAFT, Relocaliser, decode_jpeg, describe
+from ubuntu_ferret_scanner.tracking import Tracker, relative_angle
 
 PREVIEW_STEP = 2
 CLOUD_PIXEL_STEP = 4
 CLOUD_FRAME_STEP = 3
-COLOUR_DRAFT = (960, 540)
 GAUGE_WINDOW = 200  # pixels either side of the frame centre
 MIN_GAUGE_FILL = 0.05
+RELOCALISE_EVERY = 3  # frames between attempts while lost
+AGREE_ATTEMPTS = 4  # a first match must be confirmed within this many attempts
+AGREE_MM = 60.0
+AGREE_RAD = 0.35
 
 
 @dataclass
@@ -39,6 +41,7 @@ class Update:
     state: str = "idle"
     frames: int = 0
     lost_frames: int = 0
+    recoveries: int = 0
     points: np.ndarray | None = None
     colours: np.ndarray | None = None
     pose: np.ndarray | None = None
@@ -54,16 +57,6 @@ def turbo_table():
     g = np.clip(1.5 - np.abs(4 * x - 2), 0, 1)
     b = np.clip(1.5 - np.abs(4 * x - 3), 0, 1)
     return (np.column_stack((r, g, b)) * 255).astype(np.uint8)
-
-
-def decode_jpeg(data):
-    """Decodes a colour frame at half size. Returns None if the frame is damaged."""
-    try:
-        image = Image.open(io.BytesIO(data))
-        image.draft("RGB", COLOUR_DRAFT)
-        return np.asarray(image.convert("RGB"))
-    except OSError:
-        return None
 
 
 class LivePipeline:
@@ -94,10 +87,17 @@ class LivePipeline:
         self.lost_frames = 0
         self.seen = torch.empty(0, dtype=torch.int64, device=self.device)
         self.total_points = 0
+        self.relocaliser = None
+        self.key_poses = {}
+        self.lost_run = 0
+        self.recoveries = 0
+        self.pending = None
+        self.pending_age = 0
 
     def start_scan(self, session):
         self.reset_scan()
         self.tracker = Tracker(self.device)
+        self.relocaliser = Relocaliser(self.device)
         self.poses_file = open(session.poses_path, "w")
         self.scanning = True
 
@@ -158,6 +158,38 @@ class LivePipeline:
             colours = self.colour[cv, cu]
         return camera_to_view(world[chosen].float().cpu().numpy()), colours
 
+    def remember_keyframe(self, depth, levels, pose):
+        """Saves a keyframe that tracking can return to if it gets lost."""
+        if self.colour is None:
+            return
+        view = describe(depth, self.colour)
+        if view is not None:
+            key = len(self.key_poses)
+            self.key_poses[key] = pose.clone()
+            self.relocaliser.add(key, view, levels)
+
+    def try_relocalise(self, depth, levels):
+        """Looks for the current view in the scan. A position must be found twice to count."""
+        if self.colour is None:
+            return False
+        match = self.relocaliser.find(describe(depth, self.colour), levels)
+        self.pending_age += 1
+        if self.pending is not None and self.pending_age > AGREE_ATTEMPTS:
+            self.pending = None
+        if match is None:
+            return False
+
+        pose = self.key_poses[match.key] @ match.T
+        if self.pending is not None:
+            change = torch.linalg.inv(self.pending) @ pose
+            if float(change[:3, 3].norm()) < AGREE_MM and relative_angle(change) < AGREE_RAD:
+                self.tracker.rejoin(pose, levels)
+                self.pending = None
+                return True
+        self.pending = pose
+        self.pending_age = 0
+        return False
+
     def process_depth(self, frame, want_preview):
         started = time.perf_counter()
         raw = torch.frombuffer(bytearray(frame.data), dtype=torch.uint8).to(self.device)
@@ -170,11 +202,19 @@ class LivePipeline:
         if self.scanning:
             number = self.frames
             self.frames += 1
-            result, _ = self.tracker.feed(depth)
+            result, levels = self.tracker.feed(depth)
             update.state = result.state
+            if result.new_keyframe:
+                self.remember_keyframe(depth, levels, result.pose)
             if result.pose is None:
                 self.lost_frames += 1
+                self.lost_run += 1
+                if self.lost_run % RELOCALISE_EVERY == 0 and self.try_relocalise(depth, levels):
+                    update.state = "recovered"
+                    self.recoveries += 1
+                    self.lost_run = 0
             else:
+                self.lost_run = 0
                 pose = result.pose.cpu().numpy()
                 update.pose = pose
                 self.poses_file.write(f"{number}," + ",".join(f"{x:.9g}" for x in pose.ravel()) + "\n")
@@ -182,6 +222,7 @@ class LivePipeline:
                     update.points, update.colours = self.add_points(depth, result.pose)
         update.frames = self.frames
         update.lost_frames = self.lost_frames
+        update.recoveries = self.recoveries
         update.total_points = self.total_points
         update.process_ms = (time.perf_counter() - started) * 1000
         return update
